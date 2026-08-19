@@ -115,14 +115,14 @@ function provisioning_get_nodes() {
     done
 }
 
-# Download MiniMax H3 weights via hf_transfer (parallel sharded LFS download)
+# Download MiniMax H3 weights via Xet (concurrent chunk-based parallel transfer)
 function provisioning_get_h3_weights() {
-    # Install hf_transfer so HF_HUB_ENABLE_HF_TRANSFER actually shards; else single-stream
-    if ! python3 -c "import hf_transfer" 2>/dev/null; then
-        printf "Installing hf_transfer for parallel downloads...\n"
-        pip install --no-cache-dir hf_transfer
+    # hf_xet must be installed or huggingface_hub falls back to single-stream LFS (~88MB/s).
+    # Once present it auto-engages for Xet-backed repos like Comfy-Org/MiniMax-H3.
+    if ! python3 -c "import hf_xet" 2>/dev/null; then
+        printf "Installing hf_xet for parallel chunk download...\n"
+        pip install --no-cache-dir hf_xet
     fi
-    export HF_HUB_ENABLE_HF_TRANSFER=1
 
     local hf_repo="Comfy-Org/MiniMax-H3"
     local local_dir="${COMFYUI_DIR}/models"
@@ -140,7 +140,7 @@ function provisioning_get_h3_weights() {
         hf_args+=(--include "${f}")
     done
 
-    printf "Downloading MiniMax H3 weights (hf_transfer parallel) to %s...\n" "${local_dir}"
+    printf "Downloading MiniMax H3 weights (hf_xet parallel) to %s...\n" "${local_dir}"
     hf download "${hf_repo}" --local-dir "${local_dir}" "${hf_args[@]}"
 }
 
