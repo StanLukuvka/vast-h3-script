@@ -30,6 +30,11 @@ export HF_HUB_DISABLE_UPDATE_CHECK=${HF_HUB_DISABLE_UPDATE_CHECK:-1}
 
 USE_XET="${USE_XET:-1}"
 
+# Activate high-performance Xet when requested
+if [ "${USE_XET}" = "1" ]; then
+  export HF_XET_HIGH_PERFORMANCE=1
+fi
+
 log()  { printf '\e[1;34m[%s]\e[0m %s\n' "$(date +%H:%M:%S)" "$*"; }
 ok()   { printf '\e[1;32m[OK]\e[0m %s\n' "$*"; }
 fail() { printf '\e[1;31m[FAIL]\e[0m %s\n' "$*" >&2; exit 1; }
@@ -67,12 +72,23 @@ hf --version >/dev/null 2>&1 || fail "hf CLI unavailable"
 
 # --- Fast parallel download: Xet-sharded when enabled ---
 log "Downloading weights via hf download (USE_XET=${USE_XET})..."
+
+# Build --include flags individually (hf CLI requires separate flags per pattern)
+INCLUDE_FLAGS=()
+for f in "${WEIGHT_FILES[@]}"; do
+  INCLUDE_FLAGS+=("--include" "${f}")
+done
+
+# Pass HF_TOKEN if available
+TOKEN_FLAGS=()
+[ -n "${HF_TOKEN:-}" ] && TOKEN_FLAGS=("--token" "${HF_TOKEN}")
+
 HF_XET_CACHE="${HF_XET_CACHE:-/root/.cache/huggingface/xet}" \
   hf download "${HF_REPO}" \
-  --include "$(printf '%s\n' "${WEIGHT_FILES[@]}" | paste -sd, -)" \
+  "${INCLUDE_FLAGS[@]}" \
+  "${TOKEN_FLAGS[@]}" \
   --local-dir "${WEIGHTS_DIR}" \
   --local-dir-use-symlinks false \
-  2>&1 | tail -25 \
   || fail "weight download failed"
 
 for f in "${WEIGHT_FILES[@]}"; do
@@ -96,6 +112,12 @@ SPEED_DIR="${COMFY_DIR}/custom_nodes/ComfyUI-MiniMax-H3-SPEED"
 
 [ -d "${KJNODES_DIR}/.git" ] || git clone "$KJNODES_REPO" "${KJNODES_DIR}"
 [ -d "${SPEED_DIR}/.git"   ] || git clone --branch dev --single-branch "$SPEED_REPO" "${SPEED_DIR}"
+
+# Update existing clones
+git -C "${KJNODES_DIR}" fetch --depth=1 origin >/dev/null 2>&1 || true
+git -C "${KJNODES_DIR}" reset --hard origin/HEAD >/dev/null 2>&1 || true
+git -C "${SPEED_DIR}" fetch --depth=1 origin dev >/dev/null 2>&1 || true
+git -C "${SPEED_DIR}" reset --hard FETCH_HEAD >/dev/null 2>&1 || true
 
 # Light deps from KJNodes if any are listed
 if [ -f "${KJNODES_DIR}/requirements.txt" ]; then
@@ -129,4 +151,5 @@ ok "workflow ready"
 log "=== Launching ComfyUI :${PORT} ==="
 exec python3 "${COMFY_DIR}/main.py" \
   --listen 0.0.0.0 \
-  --port "${PORT}"
+  --port "${PORT}" \
+  --lowvram
