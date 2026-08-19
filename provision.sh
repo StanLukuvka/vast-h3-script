@@ -60,12 +60,9 @@ WEIGHT_FILES=(
 
 # --- Ensure hf CLI ---
 log "=== hf download ==="
-python3 - <<'PY'
-import importlib.util, sys
-sys.exit(0 if importlib.util.find_spec("huggingface_hub") else 1)
-PY >/dev/null 2>&1 \
-  || pip install --quiet --no-cache-dir "huggingface_hub[cli]==0.34.0"
-
+if ! python3 -c "import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('huggingface_hub') else 1)" 2>/dev/null; then
+  pip install --quiet --no-cache-dir "huggingface_hub[cli]==0.34.0"
+fi
 hf --version >/dev/null 2>&1 || fail "hf CLI unavailable"
 
 # --- Fast parallel download: Xet-sharded when enabled ---
@@ -106,7 +103,7 @@ if [ -f "${KJNODES_DIR}/requirements.txt" ]; then
 fi
 ok "nodes ready"
 
-# --- Write SPEED workflow (no SageAttention patch node) ---
+# --- Write SPEED workflow ---
 log "=== Writing SPEED workflow ==="
 mkdir -p "${COMFY_DIR}/user/default/workflows"
 cat > "${COMFY_DIR}/user/default/workflows/minimax_h3_vast_speed.json" <<'JSON'
