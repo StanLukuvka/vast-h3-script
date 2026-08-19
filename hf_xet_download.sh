@@ -20,6 +20,7 @@
 #   - Override concurrency: HF_XET_NUM_CONCURRENT_RANGE_GETS=N (default 64).
 
 hf_xet_download() {
+    echo "[DEBUG] hf_xet_download CALLED with $# args: $*" >&2
     if [[ $# -lt 3 ]]; then
         printf "hf_xet_download: usage: hf_xet_download <repo_id> <local_dir> <file1> [file2 ...]\n" >&2
         return 1
@@ -33,6 +34,9 @@ hf_xet_download() {
     export HF_XET_HIGH_PERFORMANCE=1
     export HF_XET_NUM_CONCURRENT_RANGE_GETS="${HF_XET_NUM_CONCURRENT_RANGE_GETS:-64}"
 
+    echo "[DEBUG] hf=$(command -v hf || echo MISSING)  HF_TOKEN set? ${HF_TOKEN:+yes}${HF_TOKEN:-no}" >&2
+    echo "[DEBUG] repo=${hf_repo} local_dir=${local_dir} NF_CONCURRENT=${HF_XET_NUM_CONCURRENT_RANGE_GETS}" >&2
+
     local hf_args=()
     [[ -n "${HF_TOKEN}" ]] && hf_args+=(--token "${HF_TOKEN}")
 
@@ -41,6 +45,7 @@ hf_xet_download() {
         hf_args+=(--include "${f}")
     done
 
+    echo "[DEBUG] running: hf download ${hf_repo} --local-dir ${local_dir} ${hf_args[*]}" >&2
     printf "Downloading %d file(s) from %s (hf_xet parallel) to %s...\n" \
         "$#" "${hf_repo}" "${local_dir}"
     hf download "${hf_repo}" --local-dir "${local_dir}" "${hf_args[@]}"

@@ -43,17 +43,32 @@ CONTROLNET_MODELS=(
 
 ### DO NOT EDIT BELOW HERE UNLESS YOU KNOW WHAT YOU ARE DOING ###
 
-# Load the standalone Xet downloader (hf_xet_download <repo> <dir> <files...>)
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=/dev/null
-source "${SCRIPT_DIR}/hf_xet_download.sh"
+# Load the standalone Xet downloader (hf_xet_download <repo> <dir> <files...>).
+# NOTE: the Vast provisioner writes PROVISIONING_SCRIPT to a fixed path
+# (/provisioning.sh) and runs it directly, so BASH_SOURCE sibling resolution
+# is unreliable. Instead we fetch the helper from the same raw URL the
+# provisioner used for this script. Override via HF_XET_SCRIPT_URL if needed.
+HF_XET_SCRIPT_URL="${HF_XET_SCRIPT_URL:-https://raw.githubusercontent.com/StanLukuvka/vast-h3-script/main/hf_xet_download.sh}"
+HF_XET_SCRIPT_LOCAL="/tmp/hf_xet_download.sh"
+echo "[DEBUG] default.sh BASH_SOURCE[0]=${BASH_SOURCE[0]}" >&2
+echo "[DEBUG] fetching hf_xet_download.sh from ${HF_XET_SCRIPT_URL}" >&2
+if curl -fsSL "${HF_XET_SCRIPT_URL}" -o "${HF_XET_SCRIPT_LOCAL}"; then
+    # shellcheck source=/dev/null
+    source "${HF_XET_SCRIPT_LOCAL}"
+    echo "[DEBUG] sourced hf_xet_download.sh OK from ${HF_XET_SCRIPT_LOCAL}" >&2
+else
+    echo "[DEBUG] WARNING: failed to fetch hf_xet_download.sh from ${HF_XET_SCRIPT_URL}" >&2
+fi
 
 function provisioning_start() {
+    echo "[DEBUG] provisioning_start ENTERED" >&2
     provisioning_print_header
     provisioning_get_apt_packages
     provisioning_get_nodes
     provisioning_get_pip_packages
+    echo "[DEBUG] about to call provisioning_get_h3_weights" >&2
     provisioning_get_h3_weights
+    echo "[DEBUG] provisioning_get_h3_weights returned (rc=$?)" >&2
     provisioning_get_files \
         "${COMFYUI_DIR}/models/checkpoints" \
         "${CHECKPOINT_MODELS[@]}"
