@@ -30,6 +30,7 @@ export HF_HUB_DISABLE_UPDATE_CHECK=${HF_HUB_DISABLE_UPDATE_CHECK:-1}
 
 USE_XET="${USE_XET:-1}"
 
+export HF_XET_CACHE="${HF_XET_CACHE:-/root/.cache/huggingface/xet}"
 # Activate high-performance Xet when requested
 if [ "${USE_XET}" = "1" ]; then
   export HF_XET_HIGH_PERFORMANCE=1
@@ -43,8 +44,9 @@ fail() { printf '\e[1;31m[FAIL]\e[0m %s\n' "$*" >&2; exit 1; }
 : "${COMFY_DIR:=/ComfyUI}"
 [ -d "${COMFY_DIR}" ] || fail "ComfyUI not found at ${COMFY_DIR}"
 
-log "ComfyUI root: ${COMFY_DIR}"
-log "PyTorch: $(python3 -c 'import torch,sys; print(torch.__version__, "CUDA", torch.version.cuda)' 2>&1 || fail 'PyTorch import failed')"
+log "=== gpu check ==="
+command -v nvidia-smi >/dev/null 2>&1 || fail "nvidia-smi not found — requires GPU instance"
+log "PyTorch: $(python3 -c 'import torch,sys; print(torch.__version__, "CUDA", torch.version.cuda)' 2>&1 || warn 'PyTorch import skipped')"
 
 : "${APP_ROOT:=/opt/h3-t4}"
 : "${PORT:=8188}"
@@ -66,25 +68,30 @@ WEIGHT_FILES=(
 # --- Ensure hf CLI ---
 log "=== hf download ==="
 if ! python3 -c "import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('huggingface_hub') else 1)" 2>/dev/null; then
-  pip install --quiet --no-cache-dir "huggingface_hub[cli]==0.34.0"
+  pip install --quiet --no-cache-dir "huggingface_hub[cli]>=0.32.0"
 fi
 hf --version >/dev/null 2>&1 || fail "hf CLI unavailable"
 
 # --- Fast parallel download: Xet-sharded when enabled ---
 log "Downloading weights via hf download (USE_XET=${USE_XET})..."
 
-# Build --include flags individually (hf CLI requires separate flags per pattern)
+# Dry-run first so user can see what's cached vs. needed
+log "Dry-run:"
 INCLUDE_FLAGS=()
 for f in "${WEIGHT_FILES[@]}"; do
   INCLUDE_FLAGS+=("--include" "${f}")
 done
-
-# Pass HF_TOKEN if available
 TOKEN_FLAGS=()
 [ -n "${HF_TOKEN:-}" ] && TOKEN_FLAGS=("--token" "${HF_TOKEN}")
 
-HF_XET_CACHE="${HF_XET_CACHE:-/root/.cache/huggingface/xet}" \
-  hf download "${HF_REPO}" \
+hf download "${HF_REPO}" \
+  "${INCLUDE_FLAGS[@]}" \
+  "${TOKEN_FLAGS[@]}" \
+  --local-dir "${WEIGHTS_DIR}" \
+  --local-dir-use-symlinks false \
+  --dry-run 2>&1 | sed 's/^/  /'
+
+hf download "${HF_REPO}" \
   "${INCLUDE_FLAGS[@]}" \
   "${TOKEN_FLAGS[@]}" \
   --local-dir "${WEIGHTS_DIR}" \
@@ -152,4 +159,6 @@ log "=== Launching ComfyUI :${PORT} ==="
 exec python3 "${COMFY_DIR}/main.py" \
   --listen 0.0.0.0 \
   --port "${PORT}" \
-  --lowvram
+  --lowvram \
+  --cache-none \
+  --preview-method none
