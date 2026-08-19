@@ -48,6 +48,7 @@ function provisioning_start() {
     provisioning_get_apt_packages
     provisioning_get_nodes
     provisioning_get_pip_packages
+    provisioning_get_h3_weights
     provisioning_get_files \
         "${COMFYUI_DIR}/models/checkpoints" \
         "${CHECKPOINT_MODELS[@]}"
@@ -112,6 +113,35 @@ function provisioning_get_nodes() {
             fi
         fi
     done
+}
+
+# Download MiniMax H3 weights via hf_transfer (parallel sharded LFS download)
+function provisioning_get_h3_weights() {
+    # Install hf_transfer so HF_HUB_ENABLE_HF_TRANSFER actually shards; else single-stream
+    if ! python3 -c "import hf_transfer" 2>/dev/null; then
+        printf "Installing hf_transfer for parallel downloads...\n"
+        pip install --no-cache-dir hf_transfer
+    fi
+    export HF_HUB_ENABLE_HF_TRANSFER=1
+
+    local hf_repo="Comfy-Org/MiniMax-H3"
+    local local_dir="${COMFYUI_DIR}/models"
+    local hf_args=()
+    [[ -n "${HF_TOKEN}" ]] && hf_args+=(--token "${HF_TOKEN}")
+
+    # Lean t2v+i2v stack (~38GB); add ref2va + turbo loras for r2v if you want all three
+    local files=(
+        "diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors"
+        "text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors"
+        "vae/minimax_h3_video_vae_fp16.safetensors"
+        "vae/minimax_h3_audio_vae_fp32.safetensors"
+    )
+    for f in "${files[@]}"; do
+        hf_args+=(--include "${f}")
+    done
+
+    printf "Downloading MiniMax H3 weights (hf_transfer parallel) to %s...\n" "${local_dir}"
+    hf download "${hf_repo}" --local-dir "${local_dir}" "${hf_args[@]}"
 }
 
 function provisioning_get_files() {
