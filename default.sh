@@ -43,6 +43,11 @@ CONTROLNET_MODELS=(
 
 ### DO NOT EDIT BELOW HERE UNLESS YOU KNOW WHAT YOU ARE DOING ###
 
+# Load the standalone Xet downloader (hf_xet_download <repo> <dir> <files...>)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=/dev/null
+source "${SCRIPT_DIR}/hf_xet_download.sh"
+
 function provisioning_start() {
     provisioning_print_header
     provisioning_get_apt_packages
@@ -115,34 +120,14 @@ function provisioning_get_nodes() {
     done
 }
 
-# Download MiniMax H3 weights via Xet (concurrent chunk-based parallel transfer)
+# Pull the MiniMax H3 weights using the standalone Xet downloader.
 function provisioning_get_h3_weights() {
-    # Modern huggingface_hub (>=0.32.0) auto-uses hf_xet; hf_transfer is deprecated.
-    # Xet splits each file into chunks and pulls them over concurrent HTTP range
-    # requests. Its adaptive controller starts conservative and ramps slowly, so we
-    # force high-performance mode and a high concurrent-range cap to actually use a
-    # fast link instead of waiting for the controller to scale up.
-    export HF_XET_HIGH_PERFORMANCE=1
-    export HF_XET_NUM_CONCURRENT_RANGE_GETS="${HF_XET_NUM_CONCURRENT_RANGE_GETS:-64}"
-
-    local hf_repo="Comfy-Org/MiniMax-H3"
-    local local_dir="${COMFYUI_DIR}/models"
-    local hf_args=()
-    [[ -n "${HF_TOKEN}" ]] && hf_args+=(--token "${HF_TOKEN}")
-
-    # Lean t2v+i2v stack (~38GB); add ref2va + turbo loras for r2v if you want all three
-    local files=(
-        "diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors"
-        "text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors"
-        "vae/minimax_h3_video_vae_fp16.safetensors"
+    # Lean t2v+i2v stack (~38GB); add ref2va + turbo loras for r2v if you want all three.
+    hf_xet_download "Comfy-Org/MiniMax-H3" "${COMFYUI_DIR}/models" \
+        "diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors" \
+        "text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors" \
+        "vae/minimax_h3_video_vae_fp16.safetensors" \
         "vae/minimax_h3_audio_vae_fp32.safetensors"
-    )
-    for f in "${files[@]}"; do
-        hf_args+=(--include "${f}")
-    done
-
-    printf "Downloading MiniMax H3 weights (hf_xet parallel) to %s...\n" "${local_dir}"
-    hf download "${hf_repo}" --local-dir "${local_dir}" "${hf_args[@]}"
 }
 
 function provisioning_get_files() {
