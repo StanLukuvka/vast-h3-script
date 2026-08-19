@@ -1,0 +1,104 @@
+# Universal ComfyUI Installer — Public Config Schema
+# Location: config.yaml (committed to repo, loaded by default.sh at runtime)
+#
+# Two-stage flow:
+#   1. PUBLIC config (this file) — declares models, modules, and wiring. Lives in
+#      your repo; portable across Vast/RunPod/any GPU cloud.
+#   2. PRIVATE env vars (instance-local) — HF_TOKEN, CIVITAI_TOKEN, secrets. Never
+#      committed. Injected via --env in vastai create or .env in the instance.
+
+schema_version: 1
+
+# ──────────────────────────────────────────────────────────────────────────────
+# COMFYUI
+# ──────────────────────────────────────────────────────────────────────────────
+# Base image + install location. Everything else is relative to these.
+comfyui:
+  image: vastai/comfy:v0.30.0-cuda-12.9-py312
+  # or runpod: "runpod/stable-diffusion:webui-111a86f8"
+  dir: /ComfyUI                      # absolute path to ComfyUI root
+  port: 18188
+  # Launch args passed to ComfyUI via COMFYUI_ARGS (Vast) or directly (RunPod).
+  # --disable-auto-launch: don't auto-start before provisioning completes.
+  # --lowvram: critical on 24GB cards; keeps weights off VRAM until inference.
+  # Without --lowvram, provisioning hangs trying to load weights.
+  launch_args: "--disable-auto-launch --port 18188 --enable-cors-header --lowvram"
+
+# ──────────────────────────────────────────────────────────────────────────────
+# DOWNLOAD ENGINE
+# ──────────────────────────────────────────────────────────────────────────────
+# Currently only "xet" is supported (parallel chunk download via hf_xet).
+# The engine is responsible for all model/module downloads.
+download:
+  engine: xet
+  settings:
+    high_performance: true           # HF_XET_HIGH_PERFORMANCE
+    concurrent_range_gets: 64        # HF_XET_NUM_CONCURRENT_RANGE_GETS
+
+# ──────────────────────────────────────────────────────────────────────────────
+# MODELS
+# ──────────────────────────────────────────────────────────────────────────────
+# Each entry maps a repo + files into a ComfyUI model subfolder.
+# The installer creates the subfolder automatically under COMFYUI_DIR/models/.
+#
+# subfolder values are ComfyUI's standard folder_names (diffusion_models,
+# text_encoders, vae, lora, checkpoints, controlnet, etc.).
+models:
+  - repo: Comfy-Org/MiniMax-H3
+    files:
+      - diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors
+      - text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors
+      - vae/minimax_h3_video_vae_fp16.safetensors
+      - vae/minimax_h3_audio_vae_fp32.safetensors
+
+  # Example: add r2v support
+  # - repo: Comfy-Org/MiniMax-H3
+  #   files:
+  #     - diffusion_models/minimax_h3_ref2va_pruned_int8_convrot.safetensors
+
+  # Example: lora
+  # - repo: some/loras
+  #   files:
+  #     - loras/minimax_h3_fl2v_turbo_8step_v1.0.safetensors
+
+  # Example: checkpoint (public, gated, or CivitAI)
+  # - repo: some/checkpoint
+  #   files:
+  #     - checkpoint.safetensors
+
+# ──────────────────────────────────────────────────────────────────────────────
+# MODULES (custom nodes / extensions)
+# ──────────────────────────────────────────────────────────────────────────────
+# Each entry clones a Git repo into COMFYUI_DIR/custom_nodes/<repo_name>.
+# Supports @branch suffix. requirements.txt is installed if present.
+modules:
+  - url: https://github.com/StanLukuvka/ComfyUI-MiniMax-H3-SPEED
+    branch: dev               # optional, defaults to repo default
+
+  # Example: a pinned version
+  # - url: https://github.com/some/ComfyUI-Manager
+  #   branch: v3.28.1
+
+  # Example: no branch (uses default)
+  # - url: https://github.com/another/node-pack
+
+# ──────────────────────────────────────────────────────────────────────────────
+# ENVIRONMENT (optional)
+# ──────────────────────────────────────────────────────────────────────────────
+# Additional environment variables to export during provisioning.
+# These are PUBLIC (non-secret) — things like proxy settings, debug flags, etc.
+# Secrets (HF_TOKEN, CIVITAI_TOKEN) go in the instance's private env, NOT here.
+env:
+  HF_HUB_ENABLE_HF_TRANSFER: "0"    # deprecated, harmless no-op in modern hub
+  # HTTP_PROXY: "http://proxy:8080"  # if needed
+  # PIP_NO_CACHE_DIR: "1"
+
+# ──────────────────────────────────────────────────────────────────────────────
+# PRE/POST HOOKS (optional, reserved for future)
+# ──────────────────────────────────────────────────────────────────────────────
+# Hook scripts run before/after the download phase. Paths are relative to the
+# repo root. Useful for: patching nodes, symlinking caches, etc.
+hooks:
+  before_download: ""               # e.g. scripts/pre_download.sh
+  after_download: ""                # e.g. scripts/post_download.sh
+  after_provisioning: ""            # run after ComfyUI is wired up

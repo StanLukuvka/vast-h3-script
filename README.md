@@ -1,48 +1,71 @@
 # vast-h3-script
 
-My Vast.Ai scripts for running MiniMax H3 on rented GPUs. Provisioning script designed
-to run on the official **`vastai/comfy:v0.30.0-cuda-12.9-py312`** base image.
+Vast.Ai / RunPod provisioning for **MiniMax H3** on rented GPUs, using the official
+**`vastai/comfy:v0.30.0-cuda-12.9-py312`** base image. The instance installs weights
+(parallel Xet download) + custom nodes, then the base image's supervisor launches
+ComfyUI.
 
-## provision.sh — primary script
+## What it does
 
-Runs after the base image comes up. The base provides ComfyUI + CUDA 12.9 + PyTorch;
-the script only adds the missing pieces:
+`default.sh` (PROVISIONING_SCRIPT) runs at boot and:
 
-1. `hf` CLI + **Xet sharded parallel download** of the 4 needed safetensors
-   from `Comfy-Org/MiniMax-H3` (~42.5 GB)
-2. Custom nodes: **KJNodes** + **ComfyUI-MiniMax-H3-SPEED** (`dev` branch)
-3. Symlinks the weights into ComfyUI's `models/` tree
-4. Writes a SPEED workflow (half-then-full sampler preset)
-5. Launches ComfyUI with `--lowvram --cache-none --preview-method none`
+1. Installs the **ComfyUI-MiniMax-H3-SPEED** custom node (`dev` branch) into
+   `/ComfyUI/custom_nodes/`
+2. Downloads the 4 needed safetensors from `Comfy-Org/MiniMax-H3` (~42.5 GB) via
+   **Xet parallel chunk download** (hf_xet) into `/ComfyUI/models/`
+3. Exits. The base image's supervisor launches ComfyUI with `COMFYUI_ARGS`.
 
-### Env overrides
+Zero CivitAI checkpoint, zero other model downloads — only what's listed in `config.yaml`.
 
-- `USE_XET=1` — Xet sharded transfer (default ON)
-- `HF_TOKEN` — auth for gated repos
-- `APP_ROOT` — weight install root (default `/opt/h3-t4`)
-- `PORT` — ComfyUI port (default `8188`)
+## Files
 
-### Weights
+- `default.sh` — provisioning script (PROVISIONING_SCRIPT target)
+- `hf_xet_download.sh` — standalone Xet downloader (`hf_xet_download <repo> <dir> <files...>`)
+- `config.yaml` — declarative spec: models, modules, download engine, ComfyUI launch args
+- `start.sh` — legacy standalone bootstrap, kept for reference only
 
-| File | Size |
-|---|---|
-| `diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors` | 20.97 GB |
-| `text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors` | 15.69 GB |
-| `vae/minimax_h3_video_vae_fp16.safetensors` | 5.21 GB |
-| `vae/minimax_h3_audio_vae_fp32.safetensors` | 0.60 GB |
+## ComfyUI launch args
 
-### Usage
+Set via `COMFYUI_ARGS` (Vast) — **must include `--lowvram`** or provisioning hangs
+trying to load 42 GB of weights onto VRAM.
 
 ```
-# On the Vast instance (e.g. via instance shell or on-start script):
-bash provision.sh
+--disable-auto-launch --port 18188 --enable-cors-header --lowvram
 ```
 
-### Notes
+## Env overrides
 
-- `USE_XET=1` also exports `HF_XET_HIGH_PERFORMANCE=1` — needs a fat pipe; drop it
-  on congested links via `USE_XET=0`.
-- Custom nodes are force-updated to remote HEAD on every rerun (idempotent).
-- No SageAttention patch node — the workflow uses the raw diffusion model.
-- `start.sh` is the older standalone bootstrap (clones ComfyUI + venv from scratch);
-  kept for reference when renting images without ComfyUI preinstalled.
+- `HF_TOKEN` — auth for gated repos (optional; public repos work without it)
+- `HF_XET_SCRIPT_URL` — override source of `hf_xet_download.sh` (default: this repo)
+- `HF_XET_NUM_CONCURRENT_RANGE_GETS` — Xet concurrency (default 64; higher on fat pipes)
+- `CONFIG_URL` — fetch `config.yaml` from a URL instead of the baked-in copy
+
+## Weights (from Comfy-Org/MiniMax-H3)
+
+| File | Size | Destination |
+|---|---|---|
+| `diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors` | 20.97 GB | models/diffusion_models |
+| `text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors` | 15.69 GB | models/text_encoders |
+| `vae/minimax_h3_video_vae_fp16.safetensors` | 5.21 GB | models/vae |
+| `vae/minimax_h3_audio_vae_fp32.safetensors` | 0.60 GB | models/vae |
+
+## Usage (Vast.Ai)
+
+```bash
+vastai create instance <OFFER_ID> \
+  --image vastai/comfy:v0.30.0-cuda-12.9-py312 \
+  --env '-p 1111:1111 -p 8080:8080 -p 8384:8384 -p 72299:72299 -p 8188:8188 \
+    -e OPEN_BUTTON_PORT=1111 -e OPEN_BUTTON_TOKEN=*** -e JUPYTER_DIR=/ \
+    -e DATA_DIRECTORY=/workspace/ -e PORTAL_CONFIG="..." \
+    -e PROVISIONING_SCRIPT=https://raw.githubusercontent.com/StanLukuvka/vast-h3-script/main/default.sh \
+    -e COMFYUI_ARGS="--disable-auto-launch --port 18188 --enable-cors-header --lowvram"' \
+  --onstart-cmd 'entrypoint.sh' \
+  --disk 70 --jupyter --ssh --direct
+```
+
+## Notes
+
+- Xet parallel download runs at ~600 MB/s after warmup (was 52 MB/s single-stream).
+- `HF_XET_HIGH_PERFORMANCE=1` is set automatically — skips Xet's adaptive ramp.
+- No SageAttention, no KJNodes — the SPEED node uses the raw diffusion model.
+- Disk: t2v+i2v stack ≈ 50 GB used (base image 7 + weights 42.5). `--disk 70` fits.
