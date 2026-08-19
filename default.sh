@@ -117,12 +117,13 @@ function provisioning_get_nodes() {
 
 # Download MiniMax H3 weights via Xet (concurrent chunk-based parallel transfer)
 function provisioning_get_h3_weights() {
-    # hf_xet must be installed or huggingface_hub falls back to single-stream LFS (~88MB/s).
-    # Once present it auto-engages for Xet-backed repos like Comfy-Org/MiniMax-H3.
-    if ! python3 -c "import hf_xet" 2>/dev/null; then
-        printf "Installing hf_xet for parallel chunk download...\n"
-        pip install --no-cache-dir hf_xet
-    fi
+    # Modern huggingface_hub (>=0.32.0) auto-uses hf_xet; hf_transfer is deprecated.
+    # Xet splits each file into chunks and pulls them over concurrent HTTP range
+    # requests. Its adaptive controller starts conservative and ramps slowly, so we
+    # force high-performance mode and a high concurrent-range cap to actually use a
+    # fast link instead of waiting for the controller to scale up.
+    export HF_XET_HIGH_PERFORMANCE=1
+    export HF_XET_NUM_CONCURRENT_RANGE_GETS="${HF_XET_NUM_CONCURRENT_RANGE_GETS:-64}"
 
     local hf_repo="Comfy-Org/MiniMax-H3"
     local local_dir="${COMFYUI_DIR}/models"
