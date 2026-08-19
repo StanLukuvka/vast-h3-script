@@ -16,8 +16,7 @@ PIP_PACKAGES=(
 )
 
 NODES=(
-    #"https://github.com/ltdrdata/ComfyUI-Manager"
-    #"https://github.com/cubiq/ComfyUI_essentials"
+    "https://github.com/StanLukuvka/ComfyUI-MiniMax-H3-SPEED@dev"
 )
 
 WORKFLOWS=(
@@ -84,6 +83,12 @@ function provisioning_get_pip_packages() {
 
 function provisioning_get_nodes() {
     for repo in "${NODES[@]}"; do
+        # Support an optional "@branch" suffix (e.g. "https://github.com/owner/repo@dev")
+        branch=""
+        if [[ "${repo}" == *"@"* ]]; then
+            branch="${repo##*@}"
+            repo="${repo%@*}"
+        fi
         dir="${repo##*/}"
         path="${COMFYUI_DIR}/custom_nodes/${dir}"
         requirements="${path}/requirements.txt"
@@ -97,9 +102,13 @@ function provisioning_get_nodes() {
             fi
         else
             printf "Downloading node: %s...\n" "${repo}"
-            git clone "${repo}" "${path}" --recursive
+            if [[ -n $branch ]]; then
+                git clone -b "${branch}" "${repo}" "${path}" --recursive
+            else
+                git clone "${repo}" "${path}" --recursive
+            fi
             if [[ -e $requirements ]]; then
-                pip install --no-cache-dir -r "${requirements}"
+                pip install --no-cache-dir -r "$requirements"
             fi
         fi
     done
