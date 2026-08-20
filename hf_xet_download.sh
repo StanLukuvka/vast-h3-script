@@ -37,10 +37,11 @@ hf_xet_download() {
         printf "    -> %s  (log: %s)\n" "${f}" "${log}"
         (
             local args=()
+            # Only pass --token when one is set. For public repos (like
+            # Comfy-Org/MiniMax-H3) no auth is needed and adding --no-token
+            # can fail on older hf CLI versions.
             if [[ -n "${HF_TOKEN}" ]]; then
                 args+=(--token "${HF_TOKEN}")
-            else
-                args+=(--no-token)
             fi
             args+=(--include "${f}")
             hf download "${hf_repo}" --local-dir "${local_dir}" "${args[@]}" \
