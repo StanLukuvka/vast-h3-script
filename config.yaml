@@ -14,7 +14,7 @@ schema_version: 1
 # ──────────────────────────────────────────────────────────────────────────────
 # Base image + install location. Everything else is relative to these.
 comfyui:
-  image: vastai/comfy:v0.30.0-cuda-12.9-py312
+  image: vastai/comfy:v0.32.0-cuda-12.9-py312   # v0.32.0+ required for H3 audio VAE decode (tiled audio fix)
   # or runpod: "runpod/stable-diffusion:webui-111a86f8"
   dir: /ComfyUI                      # absolute path to ComfyUI root
   port: 18188

@@ -67,5 +67,20 @@ vastai create instance <OFFER_ID> \
 
 - Xet parallel download runs at ~600 MB/s after warmup (was 52 MB/s single-stream).
 - `HF_XET_HIGH_PERFORMANCE=1` is set automatically — skips Xet's adaptive ramp.
+- Per-file downloads run **in parallel** (4 background `hf download` processes, one per weight).
 - No SageAttention, no KJNodes — the SPEED node uses the raw diffusion model.
 - Disk: t2v+i2v stack ≈ 50 GB used (base image 7 + weights 42.5). `--disk 70` fits.
+
+## Resolved: audio garble
+
+**Issue:** MiniMax-H3 audio decoded as garbled / silent output when running on the
+`vastai/comfy:v0.30.0-cuda-12.9-py312` base image.
+
+**Root cause:** ComfyUI v0.30.0 has the NestedTensor latent *crash* fix for H3, but
+the **tiled audio decode fix** for H3's audio VAE (`minimax_h3_audio_vae_fp32`)
+landed later in **v0.32.0**. v0.30.0's `VAEDecode` silently drops the audio stream
+from the H3 NestedTensor output, while v0.32.0 decodes both video and audio correctly.
+
+**Fix:** upgrade the base image to `vastai/comfy:v0.32.0-cuda-12.9-py312` (or newer).
+The SPEED node audio math (`clock_reindex_audio_state`, `audio_scale = 12.0/3.0`)
+was correct all along — the bug was downstream in ComfyUI's VAE decode.
