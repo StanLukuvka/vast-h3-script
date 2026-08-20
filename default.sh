@@ -50,37 +50,34 @@ CONTROLNET_MODELS=(
 # provisioner used for this script. Override via HF_XET_SCRIPT_URL if needed.
 HF_XET_SCRIPT_URL="${HF_XET_SCRIPT_URL:-https://raw.githubusercontent.com/StanLukuvka/vast-h3-script/main/hf_xet_download.sh}"
 HF_XET_SCRIPT_LOCAL="/tmp/hf_xet_download.sh"
-echo "[DEBUG] default.sh BASH_SOURCE[0]=${BASH_SOURCE[0]}" >&2
-echo "[DEBUG] fetching hf_xet_download.sh from ${HF_XET_SCRIPT_URL}" >&2
-echo "[DEBUG] curl version: $(curl --version 2>/dev/null | head -1)" >&2
-HTTP_CODE=$(curl -fsSL -w "%{http_code}" -o "${HF_XET_SCRIPT_LOCAL}" "${HF_XET_SCRIPT_URL}" 2>/tmp/curl_err.log)
-CURL_RC=$?
-if [[ ${CURL_RC} -eq 0 && -s "${HF_XET_SCRIPT_LOCAL}" ]]; then
-    LOCAL_SIZE=$(wc -c < "${HF_XET_SCRIPT_LOCAL}")
-    echo "[DEBUG] fetched ${LOCAL_SIZE} bytes to ${HF_XET_SCRIPT_LOCAL} (HTTP ${HTTP_CODE})" >&2
+
+printf "==> Loading hf_xet_download.sh from %s\n" "${HF_XET_SCRIPT_URL}"
+if ! curl -fsSL "${HF_XET_SCRIPT_URL}" -o "${HF_XET_SCRIPT_LOCAL}" 2>/tmp/curl_err.log; then
+    printf "!! ERROR: failed to fetch hf_xet_download.sh (curl rc=%s)\n" "$?" >&2
+    printf "   %s\n" "$(cat /tmp/curl_err.log 2>/dev/null)" >&2
+elif [[ ! -s "${HF_XET_SCRIPT_LOCAL}" ]]; then
+    printf "!! ERROR: fetched hf_xet_download.sh but it is empty\n" >&2
+else
     # shellcheck source=/dev/null
     source "${HF_XET_SCRIPT_LOCAL}"
-    if [[ "$(type -t hf_xet_download)" == "function" ]]; then
-        echo "[DEBUG] sourced hf_xet_download.sh OK from ${HF_XET_SCRIPT_LOCAL}" >&2
+    if [[ "$(type -t hf_xet_download)" != "function" ]]; then
+        printf "!! ERROR: hf_xet_download.sh sourced but hf_xet_download() not defined\n" >&2
+        printf "   First 5 lines of fetched file:\n" >&2
+        head -5 "${HF_XET_SCRIPT_LOCAL}" >&2
     else
-        echo "[DEBUG] WARNING: hf_xet_download.sh fetched but hf_xet_download() not defined after source" >&2
-        cat "${HF_XET_SCRIPT_LOCAL}" | head -5 >&2
+        printf "==> hf_xet_download() loaded OK (%s bytes)\n" "$(wc -c < "${HF_XET_SCRIPT_LOCAL}")"
     fi
-else
-    echo "[DEBUG] WARNING: failed to fetch hf_xet_download.sh from ${HF_XET_SCRIPT_URL} (curl_rc=${CURL_RC} http=${HTTP_CODE})" >&2
-    echo "[DEBUG] curl_err: $(cat /tmp/curl_err.log 2>/dev/null)" >&2
-    echo "[DEBUG] local file exists? $(test -f "${HF_XET_SCRIPT_LOCAL}" && echo yes || echo no)  size=$(stat -c%s "${HF_XET_SCRIPT_LOCAL}" 2>/dev/null || echo 0)" >&2
 fi
 
 function provisioning_start() {
-    echo "[DEBUG] provisioning_start ENTERED" >&2
+    printf "==> Provisioning started\n"
     provisioning_print_header
     provisioning_get_apt_packages
     provisioning_get_nodes
     provisioning_get_pip_packages
-    echo "[DEBUG] about to call provisioning_get_h3_weights" >&2
+    printf "==> Downloading H3 weights\n"
     provisioning_get_h3_weights
-    echo "[DEBUG] provisioning_get_h3_weights returned (rc=$?)" >&2
+    printf "==> H3 weights download finished (rc=%s)\n" "$?"
     provisioning_get_files \
         "${COMFYUI_DIR}/models/checkpoints" \
         "${CHECKPOINT_MODELS[@]}"
