@@ -33,8 +33,10 @@ hf_xet_download() {
     # Per-file downloads, each in its own background process.
     # Each gets its own Xet chunk concurrency AND runs concurrently with the
     # others — total throughput scales with both per-file chunks and file count.
+    # A failure on one file does NOT abort the others; it just gets logged.
     local pids=()
-    local f rc=0
+    local pid_to_file=()
+    local f
     for f in "$@"; do
         local log="/tmp/hf_xet_download.$(basename "${f}").log"
         echo "[DEBUG] launching: hf download ${hf_repo} --local-dir ${local_dir} --include ${f} (log: ${log})" >&2
@@ -49,17 +51,33 @@ hf_xet_download() {
             hf download "${hf_repo}" --local-dir "${local_dir}" "${args[@]}" \
                 > "${log}" 2>&1
         ) &
-        pids+=($!)
+        local pid=$!
+        pids+=("${pid}")
+        pid_to_file+=("${pid}:${f}")
     done
 
-    # Wait for all background downloads, capture failures.
+    # Wait for all, capture per-file success/failure.
+    local failures=0
+    local succeeded=0
     for pid in "${pids[@]}"; do
+        local rc=0
         wait "${pid}" || rc=$?
+        if [[ ${rc} -ne 0 ]]; then
+            failures=$((failures + 1))
+            echo "[DEBUG] download failed (pid=${pid} rc=${rc}); see /tmp/hf_xet_download.*.log" >&2
+        else
+            succeeded=$((succeeded + 1))
+        fi
     done
 
-    if [[ ${rc} -ne 0 ]]; then
-        echo "[DEBUG] one or more downloads failed (rc=${rc}); logs in /tmp/hf_xet_download.*.log" >&2
-        return ${rc}
+    echo "[DEBUG] downloads done: ${succeeded}/$# succeeded, ${failures} failed" >&2
+
+    # Fail only if ALL downloads failed (don't block the instance on a single
+    # transient error — partial success still leaves the node runnable for some
+    # workflows).
+    if [[ ${succeeded} -eq 0 && $# -gt 0 ]]; then
+        echo "[DEBUG] ALL downloads failed; check /tmp/hf_xet_download.*.log" >&2
+        return 1
     fi
     return 0
 }
