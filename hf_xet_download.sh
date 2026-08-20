@@ -5,19 +5,9 @@
 #   source hf_xet_download.sh
 #   hf_xet_download <repo_id> <local_dir> <file1> [file2 ...]
 #
-# Examples:
-#   hf_xet_download Comfy-Org/MiniMax-H3 /ComfyUI/models \
-#       diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors \
-#       text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors \
-#       vae/minimax_h3_video_vae_fp16.safetensors
-#
-# Notes:
-#   - Modern huggingface_hub (>=0.32.0) auto-uses hf_xet; hf_transfer is deprecated.
-#   - Xet chunks each file and pulls over concurrent HTTP range requests. Its
-#     adaptive controller starts conservative and ramps slowly, so we force
-#     high-performance mode and a high concurrent-range cap to use a fast link.
-#   - HF_TOKEN / HUGGING_FACE_HUB_TOKEN are read automatically by `hf download`.
-#   - Override concurrency: HF_XET_NUM_CONCURRENT_RANGE_GETS=N (default 64).
+# Each file is downloaded in its own background `hf download` process so the 4
+# files run in parallel (each one still uses Xet chunk concurrency internally).
+# Override per-file concurrency via HF_XET_NUM_CONCURRENT_RANGE_GETS.
 
 hf_xet_download() {
     echo "[DEBUG] hf_xet_download CALLED with $# args: $*" >&2
@@ -37,16 +27,39 @@ hf_xet_download() {
     echo "[DEBUG] hf=$(command -v hf || echo MISSING)  HF_TOKEN set? ${HF_TOKEN:+yes}${HF_TOKEN:-no}" >&2
     echo "[DEBUG] repo=${hf_repo} local_dir=${local_dir} NF_CONCURRENT=${HF_XET_NUM_CONCURRENT_RANGE_GETS}" >&2
 
-    local hf_args=()
-    [[ -n "${HF_TOKEN}" ]] && hf_args+=(--token "${HF_TOKEN}")
+    printf "Downloading %d file(s) from %s (hf_xet parallel, file-level) to %s...\n" \
+        "$#" "${hf_repo}" "${local_dir}"
 
-    local f
+    # Per-file downloads, each in its own background process.
+    # Each gets its own Xet chunk concurrency AND runs concurrently with the
+    # others — total throughput scales with both per-file chunks and file count.
+    local pids=()
+    local f rc=0
     for f in "$@"; do
-        hf_args+=(--include "${f}")
+        local log="/tmp/hf_xet_download.$(basename "${f}").log"
+        echo "[DEBUG] launching: hf download ${hf_repo} --local-dir ${local_dir} --include ${f} (log: ${log})" >&2
+        (
+            local args=()
+            if [[ -n "${HF_TOKEN}" ]]; then
+                args+=(--token "${HF_TOKEN}")
+            else
+                args+=(--no-token)
+            fi
+            args+=(--include "${f}")
+            hf download "${hf_repo}" --local-dir "${local_dir}" "${args[@]}" \
+                > "${log}" 2>&1
+        ) &
+        pids+=($!)
     done
 
-    echo "[DEBUG] running: hf download ${hf_repo} --local-dir ${local_dir} ${hf_args[*]}" >&2
-    printf "Downloading %d file(s) from %s (hf_xet parallel) to %s...\n" \
-        "$#" "${hf_repo}" "${local_dir}"
-    hf download "${hf_repo}" --local-dir "${local_dir}" "${hf_args[@]}"
+    # Wait for all background downloads, capture failures.
+    for pid in "${pids[@]}"; do
+        wait "${pid}" || rc=$?
+    done
+
+    if [[ ${rc} -ne 0 ]]; then
+        echo "[DEBUG] one or more downloads failed (rc=${rc}); logs in /tmp/hf_xet_download.*.log" >&2
+        return ${rc}
+    fi
+    return 0
 }
