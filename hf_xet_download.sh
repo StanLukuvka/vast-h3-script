@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
-# hf_xet_download.sh — parallel Xet-backed Hugging Face model downloader.
+# hf_xet_download.sh — parallel Hugging Face model downloader.
 #
 # Usage:
 #   source hf_xet_download.sh
 #   hf_xet_download <repo_id> <local_dir> <file1> [file2 ...]
 #
-# Each file downloads in its own background `hf download` process so all files
-# run in parallel (each still uses Xet chunk concurrency internally).
-# Override per-file concurrency via HF_XET_NUM_CONCURRENT_RANGE_GETS.
-# A failure on one file does NOT abort the others.
+# Uses aria2c (parallel chunked + resumable) against HF's resolve URLs when
+# available — faster and more reliable than hf CLI's Xet path for large files.
+# Falls back to `hf download` if aria2c is missing.
+#
+# Each file gets its own background process; a failure on one file does NOT
+# abort the others. Override per-file chunk count via HF_XET_NUM_CONCURRENT_RANGE_GETS.
 
 hf_xet_download() {
     if [[ $# -lt 3 ]]; then
@@ -20,15 +22,23 @@ hf_xet_download() {
     local local_dir="$2"
     shift 2
 
-    # Force Xet to actually use available bandwidth instead of ramping slowly.
-    export HF_XET_HIGH_PERFORMANCE=1
-    export HF_XET_NUM_CONCURRENT_RANGE_GETS="${HF_XET_NUM_CONCURRENT_RANGE_GETS:-64}"
+    local n_threads="${HF_XET_NUM_CONCURRENT_RANGE_GETS:-16}"
 
-    local hf_bin
-    hf_bin="$(command -v hf || echo MISSING)"
-    printf "==> Downloading %d file(s) from %s to %s\n" "$#" "${hf_repo}" "${local_dir}"
-    printf "    engine: hf_xet (high_performance=1, concurrent_ranges=%s)\n" "${HF_XET_NUM_CONCURRENT_RANGE_GETS}"
-    printf "    hf: %s | token: %s\n" "${hf_bin}" "$([[ -n ${HF_TOKEN} ]] && echo set || echo none)"
+    local has_aria2=no
+    local hf_bin="$(command -v hf || echo MISSING)"
+    if command -v aria2c >/dev/null 2>&1; then
+        has_aria2=yes
+    fi
+
+    if [[ "${has_aria2}" == "yes" ]]; then
+        printf "==> Downloading %d file(s) from %s to %s (engine: aria2c -x%d)\n" \
+            "$#" "${hf_repo}" "${local_dir}" "${n_threads}"
+    else
+        printf "==> Downloading %d file(s) from %s to %s (engine: hf CLI — aria2c not found)\n" \
+            "$#" "${hf_repo}" "${local_dir}"
+    fi
+    printf "    token: %s\n" "$([[ -n ${HF_TOKEN} ]] && echo set || echo none)"
+    printf "    aria2c: %s | hf: %s\n" "${has_aria2}" "${hf_bin}"
 
     local pids=()
     local f
@@ -36,16 +46,33 @@ hf_xet_download() {
         local log="/tmp/hf_xet_download.$(basename "${f}").log"
         printf "    -> %s  (log: %s)\n" "${f}" "${log}"
         (
-            local args=()
-            # Only pass --token when one is set. For public repos (like
-            # Comfy-Org/MiniMax-H3) no auth is needed and adding --no-token
-            # can fail on older hf CLI versions.
-            if [[ -n "${HF_TOKEN}" ]]; then
-                args+=(--token "${HF_TOKEN}")
+            mkdir -p "${local_dir}/$(dirname "${f}")"
+            local out_path="${local_dir}/${f}"
+            local url="https://huggingface.co/${hf_repo}/resolve/main/${f}"
+            local rc=0
+            if [[ "${has_aria2}" == "yes" ]]; then
+                local aria_args=()
+                if [[ -n "${HF_TOKEN}" ]]; then
+                    aria_args+=(--header="Authorization: Bearer ${HF_TOKEN}")
+                fi
+                aria2c -x"${n_threads}" -s"${n_threads}" -k1M --continue=true \
+                    --auto-file-renaming=false --allow-overwrite=false \
+                    --dir="$(dirname "${out_path}")" --out="$(basename "${out_path}")" \
+                    "${aria_args[@]}" \
+                    "${url}" > "${log}" 2>&1 || rc=$?
+            else
+                local args=()
+                if [[ -n "${HF_TOKEN}" ]]; then
+                    args+=(--token "${HF_TOKEN}")
+                fi
+                args+=(--include "${f}")
+                hf download "${hf_repo}" --local-dir "${local_dir}" "${args[@]}" \
+                    > "${log}" 2>&1 || rc=$?
             fi
-            args+=(--include "${f}")
-            hf download "${hf_repo}" --local-dir "${local_dir}" "${args[@]}" \
-                > "${log}" 2>&1
+            if [[ ${rc} -ne 0 ]]; then
+                printf "FAILED rc=%s (see %s)\n" "${rc}" "${log}" >&2
+            fi
+            exit "${rc}"
         ) &
         pids+=("$!")
     done
@@ -69,7 +96,7 @@ hf_xet_download() {
 
     # Fail only if ALL downloads failed (partial success leaves the node usable).
     if [[ ${succeeded} -eq 0 && $# -gt 0 ]]; then
-        printf "==> ALL downloads failed — check /tmp/hf_xet_download.*.log\n" >&2
+        printf "!! ALL downloads failed — check /tmp/hf_xet_download.*.log\n" >&2
         return 1
     fi
     return 0
