@@ -37,7 +37,7 @@ hf_xet_download() {
         printf "==> Downloading %d file(s) from %s to %s (engine: hf CLI — aria2c not found)\n" \
             "$#" "${hf_repo}" "${local_dir}"
     fi
-    printf "    token: %s\n" "$([[ -n ${HF_TOKEN} ]] && echo set || echo none)"
+    printf "    token: %s\n" "$([[ -n ${HF_TOKEN:-} ]] && echo set || echo none)"
     printf "    aria2c: %s | hf: %s\n" "${has_aria2}" "${hf_bin}"
 
     local pids=()
@@ -52,7 +52,7 @@ hf_xet_download() {
             local rc=0
             if [[ "${has_aria2}" == "yes" ]]; then
                 local aria_args=()
-                if [[ -n "${HF_TOKEN}" ]]; then
+                if [[ -n "${HF_TOKEN:-}" ]]; then
                     aria_args+=(--header="Authorization: Bearer ${HF_TOKEN}")
                 fi
                 aria2c -x"${n_threads}" -s"${n_threads}" -k1M --continue=true \
@@ -62,11 +62,13 @@ hf_xet_download() {
                     "${url}" > "${log}" 2>&1 || rc=$?
             else
                 local args=()
-                if [[ -n "${HF_TOKEN}" ]]; then
+                if [[ -n "${HF_TOKEN:-}" ]]; then
                     args+=(--token "${HF_TOKEN}")
                 fi
                 args+=(--include "${f}")
-                hf download "${hf_repo}" --local-dir "${local_dir}" "${args[@]}" \
+                # HF_HUB_DISABLE_XET=1 forces the plain LFS path — avoids the
+                # known Xet CAS connection hang that blocks hf download forever.
+                HF_HUB_DISABLE_XET=1 hf download "${hf_repo}" --local-dir "${local_dir}" "${args[@]}" \
                     > "${log}" 2>&1 || rc=$?
             fi
             if [[ ${rc} -ne 0 ]]; then
@@ -78,6 +80,8 @@ hf_xet_download() {
     done
 
     # Wait for all, capture per-file success/failure.
+    # `|| rc=$?` is REQUIRED: under `set -e` (inherited from default.sh), a
+    # non-zero `wait` on a failed background job would abort the whole script.
     local failures=0
     local succeeded=0
     local pid

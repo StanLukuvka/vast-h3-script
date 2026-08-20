@@ -1,4 +1,5 @@
 #!/bin/bash
+set -euo pipefail
 
 source /venv/main/bin/activate
 COMFYUI_DIR=${WORKSPACE}/ComfyUI
@@ -6,8 +7,7 @@ COMFYUI_DIR=${WORKSPACE}/ComfyUI
 # Packages are installed after nodes so we can fix them...
 
 APT_PACKAGES=(
-    #"package-1"
-    #"package-2"
+    "aria2"
 )
 
 PIP_PACKAGES=(
@@ -52,11 +52,15 @@ HF_XET_SCRIPT_URL="${HF_XET_SCRIPT_URL:-https://raw.githubusercontent.com/StanLu
 HF_XET_SCRIPT_LOCAL="/tmp/hf_xet_download.sh"
 
 printf "==> Loading hf_xet_download.sh from %s\n" "${HF_XET_SCRIPT_URL}"
-if ! curl -fsSL "${HF_XET_SCRIPT_URL}" -o "${HF_XET_SCRIPT_LOCAL}" 2>/tmp/curl_err.log; then
-    printf "!! ERROR: failed to fetch hf_xet_download.sh (curl rc=%s)\n" "$?" >&2
+curl -fsSL "${HF_XET_SCRIPT_URL}" -o "${HF_XET_SCRIPT_LOCAL}" 2>/tmp/curl_err.log
+CURL_RC=$?
+if [[ ${CURL_RC} -ne 0 ]]; then
+    printf "!! ERROR: failed to fetch hf_xet_download.sh (curl rc=%s)\n" "${CURL_RC}" >&2
     printf "   %s\n" "$(cat /tmp/curl_err.log 2>/dev/null)" >&2
+    exit 1
 elif [[ ! -s "${HF_XET_SCRIPT_LOCAL}" ]]; then
     printf "!! ERROR: fetched hf_xet_download.sh but it is empty\n" >&2
+    exit 1
 else
     # shellcheck source=/dev/null
     source "${HF_XET_SCRIPT_LOCAL}"
