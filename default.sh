@@ -156,6 +156,12 @@ function provisioning_get_h3_weights() {
         "text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors" \
         "vae/minimax_h3_video_vae_fp16.safetensors" \
         "vae/minimax_h3_audio_vae_fp32.safetensors"
+
+    # Turbo LoRA: 4-step FL2V at 768p (284 MiB, dynamic-rank BF16)
+    # drbaph/MiniMax-H3-Turbo-Lora-ComfyUI stores files at repo root but
+    # ComfyUI expects them under models/loras/, so we download to loras/ directly.
+    hf_xet_download "drbaph/MiniMax-H3-Turbo-Lora-ComfyUI" "${COMFYUI_DIR}/models/loras" \
+        "minimax_h3_fl2v_turbo_4step_v1.0_768p_comfyui_resized_avg_rank_21_bf16.safetensors"
 }
 
 function provisioning_get_files() {
