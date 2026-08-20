@@ -2,7 +2,19 @@
 set -euo pipefail
 
 source /venv/main/bin/activate
-COMFYUI_DIR=${WORKSPACE}/ComfyUI
+COMFYUI_DIR="${WORKSPACE:-/workspace}/ComfyUI"
+
+# Vast base image may leave these unset; declare them so `set -u` doesn't abort.
+declare -a APT_PACKAGES=()
+declare -a PIP_PACKAGES=()
+declare -a CHECKPOINT_MODELS=()
+declare -a UNET_MODELS=()
+declare -a LORA_MODELS=()
+declare -a CONTROLNET_MODELS=()
+declare -a VAE_MODELS=()
+declare -a ESRGAN_MODELS=()
+declare -a NODES=()
+AUTO_UPDATE="${AUTO_UPDATE:-true}"
 
 # Packages are installed after nodes so we can fix them...
 
@@ -104,14 +116,15 @@ function provisioning_start() {
 }
 
 function provisioning_get_apt_packages() {
-    if [[ -n $APT_PACKAGES ]]; then
-            sudo $APT_INSTALL ${APT_PACKAGES[@]}
+    if [[ ${#APT_PACKAGES[@]} -gt 0 ]]; then
+            APT_INSTALL="${APT_INSTALL:-apt-get install -y}"
+            sudo $APT_INSTALL "${APT_PACKAGES[@]}"
     fi
 }
 
 function provisioning_get_pip_packages() {
-    if [[ -n $PIP_PACKAGES ]]; then
-            pip install --no-cache-dir ${PIP_PACKAGES[@]}
+    if [[ ${#PIP_PACKAGES[@]} -gt 0 ]]; then
+            pip install --no-cache-dir "${PIP_PACKAGES[@]}"
     fi
 }
 
@@ -188,7 +201,7 @@ function provisioning_print_end() {
 }
 
 function provisioning_has_valid_hf_token() {
-    [[ -n "$HF_TOKEN" ]] || return 1
+    [[ -n "${HF_TOKEN:-}" ]] || return 1
     url="https://huggingface.co/api/whoami-v2"
 
     response=$(curl -o /dev/null -s -w "%{http_code}" -X GET "$url" \
@@ -204,7 +217,7 @@ function provisioning_has_valid_hf_token() {
 }
 
 function provisioning_has_valid_civitai_token() {
-    [[ -n "$CIVITAI_TOKEN" ]] || return 1
+    [[ -n "${CIVITAI_TOKEN:-}" ]] || return 1
     url="https://civitai.com/api/v1/models?hidden=1&limit=1"
 
     response=$(curl -o /dev/null -s -w "%{http_code}" -X GET "$url" \
@@ -221,10 +234,10 @@ function provisioning_has_valid_civitai_token() {
 
 # Download from $1 URL to $2 file path
 function provisioning_download() {
-    if [[ -n $HF_TOKEN && $1 =~ ^https://([a-zA-Z0-9_-]+\.)?huggingface\.co(/|$|\?) ]]; then
+    if [[ -n "${HF_TOKEN:-}" && $1 =~ ^https://([a-zA-Z0-9_-]+\.)?huggingface\.co(/|$|\?) ]]; then
         auth_token="$HF_TOKEN"
     elif 
-        [[ -n $CIVITAI_TOKEN && $1 =~ ^https://([a-zA-Z0-9_-]+\.)?civitai\.com(/|$|\?) ]]; then
+        [[ -n "${CIVITAI_TOKEN:-}" && $1 =~ ^https://([a-zA-Z0-9_-]+\.)?civitai\.com(/|$|\?) ]]; then
         auth_token="$CIVITAI_TOKEN"
     fi
     if [[ -n $auth_token ]];then
