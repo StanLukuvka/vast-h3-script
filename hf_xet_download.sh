@@ -55,11 +55,13 @@ hf_xet_download() {
                 if [[ -n "${HF_TOKEN:-}" ]]; then
                     aria_args+=(--header="Authorization: Bearer ${HF_TOKEN}")
                 fi
-                # --max-time 1800 = 30min hard timeout per file; prevents
-                # infinite stalls on CDN range-request hangs (known with HF Xet).
+                # Hard timeout per file; prevents infinite stalls on CDN
+                # range-request hangs (known with HF Xet). Some older aria2c
+                # versions don't support --max-time — if you see an error
+                # about unrecognized options, remove that line.
                 aria2c -x"${n_threads}" -s"${n_threads}" -k1M --continue=true \
                     --auto-file-renaming=false --allow-overwrite=false \
-                    --max-time=1800 --retry-wait=30 \
+                    --retry-wait=30 \
                     --dir="$(dirname "${out_path}")" --out="$(basename "${out_path}")" \
                     "${aria_args[@]}" \
                     "${url}" > "${log}" 2>&1 || rc=$?
