@@ -20,7 +20,8 @@ set -euo pipefail
 #
 # Env overrides:
 #   USE_XET=1         sharded parallel Xet transfer (default ON)
-#   HF_TOKEN          optional auth for gated models
+#   HF_TOKEN          HF auth token (falls back to HUGGING_FACE_HUB_TOKEN);
+#                     set via Vast instance env vars — no hardcoding
 #   APP_ROOT          weight install root
 #   PORT              ComfyUI listen port
 # ===========================================================================
@@ -34,6 +35,21 @@ export HF_XET_CACHE="${HF_XET_CACHE:-/root/.cache/huggingface/xet}"
 # Activate high-performance Xet when requested
 if [ "${USE_XET}" = "1" ]; then
   export HF_XET_HIGH_PERFORMANCE=1
+fi
+
+# --- HuggingFace token (set on the Vast instance as an env var) ---
+# Vast passes instance env vars straight into the container; prefer HF_TOKEN,
+# fall back to the standard HUGGING_FACE_HUB_TOKEN. Export it so both `hf`
+# and ComfyUI's own gated-model loaders inherit it at runtime.
+HF_TOKEN="${HF_TOKEN:-${HUGGING_FACE_HUB_TOKEN:-}}"
+if [ -n "${HF_TOKEN}" ]; then
+  export HF_TOKEN
+  export HUGGING_FACE_HUB_TOKEN="${HF_TOKEN}"
+  if hf auth login --token "${HF_TOKEN}" >/dev/null 2>&1; then
+    log "HF token accepted (from env)"
+  else
+    warn "hf auth login failed — continuing with HF_TOKEN env fallback"
+  fi
 fi
 
 log()  { printf '\e[1;34m[%s]\e[0m %s\n' "$(date +%H:%M:%S)" "$*"; }

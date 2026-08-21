@@ -163,18 +163,15 @@ function provisioning_get_nodes() {
 
 # Pull the MiniMax H3 weights using the standalone Xet downloader.
 function provisioning_get_h3_weights() {
-    # Lean t2v+i2v stack (~38GB); add ref2va + turbo loras for r2v if you want all three.
+    # Lean t2v+i2v stack (~38GB) + turbo LoRAs.
     hf_xet_download "Comfy-Org/MiniMax-H3" "${COMFYUI_DIR}/models" \
         "diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors" \
         "text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors" \
         "vae/minimax_h3_video_vae_fp16.safetensors" \
-        "vae/minimax_h3_audio_vae_fp32.safetensors"
-
-    # Turbo LoRAs from drbaph/MiniMax-H3-Turbo-Lora-ComfyUI (dynamic-rank BF16)
-    # Files are at repo root but ComfyUI expects them under models/loras/.
-    hf_xet_download "drbaph/MiniMax-H3-Turbo-Lora-ComfyUI" "${COMFYUI_DIR}/models/loras" \
-        "minimax_h3_fl2v_turbo_4step_v1.0_768p_comfyui_resized_avg_rank_21_bf16.safetensors" \
-        "minimax_h3_fl2v_turbo_8step_v1.0_comfyui_resized_avg_rank_21_bf16.safetensors"
+        "vae/minimax_h3_audio_vae_fp32.safetensors" \
+        "loras/minimax_h3_fl2v_turbo_4step_v1.0_768p_comfyui_bf16.safetensors" \
+        "loras/minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors" \
+        "loras/minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors"
 }
 
 function provisioning_get_files() {
