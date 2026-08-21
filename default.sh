@@ -28,7 +28,7 @@ PIP_PACKAGES=(
 )
 
 NODES=(
-    "https://github.com/StanLukuvka/ComfyUI-MiniMax-H3-SPEED@dev"
+    "https://github.com/StanLukuvka/ComfyUI-MiniMax-H3-SPEED@${SPEED_BRANCH:-main}"
 )
 
 WORKFLOWS=(
