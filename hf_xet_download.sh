@@ -5,11 +5,11 @@
 #   source hf_xet_download.sh
 #   hf_xet_download <repo_id> <local_dir> <file1> [file2 ...]
 #
-# Uses wget -c (resumable single-stream) against HF's resolve URLs.
-# Each file gets its own background process; a failure on one file does NOT
-# abort the others.
+# Uses aria2c (parallel chunked + resumable) against HF's resolve URLs.
+# Falls back to `hf download` (with HF_HUB_DISABLE_XET=1) if aria2c is missing.
 #
-# For authenticated repos, set HF_TOKEN (Bearer auth header).
+# Each file gets its own background process; a failure on one file does NOT
+# abort the others. Override per-file chunk count via HF_XET_NUM_CONCURRENT_RANGE_GETS.
 
 hf_xet_download() {
     if [[ $# -lt 3 ]]; then
@@ -21,9 +21,23 @@ hf_xet_download() {
     local local_dir="$2"
     shift 2
 
-    printf "==> Downloading %d file(s) from %s to %s\\n" \
-        "$#" "${hf_repo}" "${local_dir}"
+    local n_threads="${HF_XET_NUM_CONCURRENT_RANGE_GETS:-16}"
+
+    local has_aria2=no
+    local hf_bin="$(command -v hf || echo MISSING)"
+    if command -v aria2c >/dev/null 2>&1; then
+        has_aria2=yes
+    fi
+
+    if [[ "${has_aria2}" == "yes" ]]; then
+        printf "==> Downloading %d file(s) from %s to %s (engine: aria2c -x%d)\\n" \\
+            "$#" "${hf_repo}" "${local_dir}" "${n_threads}"
+    else
+        printf "==> Downloading %d file(s) from %s to %s (engine: hf CLI — aria2c not found)\\n" \\
+            "$#" "${hf_repo}" "${local_dir}"
+    fi
     printf "    token: %s\\n" "$([[ -n ${HF_TOKEN:-} ]] && echo set || echo none)"
+    printf "    aria2c: %s | hf: %s\\n" "${has_aria2}" "${hf_bin}"
 
     local pids=()
     local f
@@ -35,16 +49,28 @@ hf_xet_download() {
             local out_path="${local_dir}/${f}"
             local url="https://huggingface.co/${hf_repo}/resolve/main/${f}"
             local rc=0
-            {
-                local wget_args=("-c" "-O" "${out_path}")
+            if [[ "${has_aria2}" == "yes" ]]; then
+                local aria_args=()
                 if [[ -n "${HF_TOKEN:-}" ]]; then
-                    wget_args+=("-e" "http_proxy=" "-e" "https_proxy="
-                                "--header=Authorization: Bearer ${HF_TOKEN}")
-                else
-                    wget_args+=("-e" "http_proxy=" "-e" "https_proxy=")
+                    aria_args+=(--header="Authorization: Bearer ${HF_TOKEN}")
                 fi
-                wget "${wget_args[@]}" "${url}"
-            } > "${log}" 2>&1 || rc=$?
+                aria2c -x"${n_threads}" -s"${n_threads}" -k1M --continue=true \\
+                    --auto-file-renaming=false --allow-overwrite=false \\
+                    --retry-wait=30 \\
+                    --dir="$(dirname "${out_path}")" --out="$(basename "${out_path}")" \\
+                    "${aria_args[@]}" \\
+                    "${url}" > "${log}" 2>&1 || rc=$?
+            else
+                local args=()
+                if [[ -n "${HF_TOKEN:-}" ]]; then
+                    args+=(--token "${HF_TOKEN}")
+                fi
+                args+=(--include "${f}")
+                # HF_HUB_DISABLE_XET=1 forces the plain LFS path — avoids the
+                # known Xet CAS connection hang that blocks hf download forever.
+                HF_HUB_DISABLE_XET=1 hf download "${hf_repo}" --local-dir "${local_dir}" "${args[@]}" \\
+                    > "${log}" 2>&1 || rc=$?
+            fi
             if [[ ${rc} -ne 0 ]]; then
                 printf "FAILED rc=%s (see %s)\\n" "${rc}" "${log}" >&2
             fi
