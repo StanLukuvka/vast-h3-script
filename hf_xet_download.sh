@@ -13,7 +13,7 @@
 
 hf_xet_download() {
     if [[ $# -lt 3 ]]; then
-        printf "hf_xet_download: usage: hf_xet_download <repo_id> <local_dir> <file1> [file2 ...]\\n" >&2
+        printf "hf_xet_download: usage: hf_xet_download <repo_id> <local_dir> <file1> [file2 ...]\n" >&2
         return 1
     fi
 
@@ -30,20 +30,20 @@ hf_xet_download() {
     fi
 
     if [[ "${has_aria2}" == "yes" ]]; then
-        printf "==> Downloading %d file(s) from %s to %s (engine: aria2c -x%d)\\n" \\
+        printf "==> Downloading %d file(s) from %s to %s (engine: aria2c -x%d)\n" \
             "$#" "${hf_repo}" "${local_dir}" "${n_threads}"
     else
-        printf "==> Downloading %d file(s) from %s to %s (engine: hf CLI — aria2c not found)\\n" \\
+        printf "==> Downloading %d file(s) from %s to %s (engine: hf CLI — aria2c not found)\n" \
             "$#" "${hf_repo}" "${local_dir}"
     fi
-    printf "    token: %s\\n" "$([[ -n ${HF_TOKEN:-} ]] && echo set || echo none)"
-    printf "    aria2c: %s | hf: %s\\n" "${has_aria2}" "${hf_bin}"
+    printf "    token: %s\n" "$([[ -n ${HF_TOKEN:-} ]] && echo set || echo none)"
+    printf "    aria2c: %s | hf: %s\n" "${has_aria2}" "${hf_bin}"
 
     local pids=()
     local f
     for f in "$@"; do
         local log="/tmp/hf_xet_download.$(basename "${f}").log"
-        printf "    -> %s  (log: %s)\\n" "${f}" "${log}"
+        printf "    -> %s  (log: %s)\n" "${f}" "${log}"
         (
             mkdir -p "${local_dir}/$(dirname "${f}")"
             local out_path="${local_dir}/${f}"
@@ -54,11 +54,11 @@ hf_xet_download() {
                 if [[ -n "${HF_TOKEN:-}" ]]; then
                     aria_args+=(--header="Authorization: Bearer ${HF_TOKEN}")
                 fi
-                aria2c -x"${n_threads}" -s"${n_threads}" -k1M --continue=true \\
-                    --auto-file-renaming=false --allow-overwrite=false \\
-                    --retry-wait=30 \\
-                    --dir="$(dirname "${out_path}")" --out="$(basename "${out_path}")" \\
-                    "${aria_args[@]}" \\
+                aria2c -x"${n_threads}" -s"${n_threads}" -k1M --continue=true \$
+                    --auto-file-renaming=false --allow-overwrite=false \$
+                    --retry-wait=30 \$
+                    --dir="$(dirname "${out_path}")" --out="$(basename "${out_path}")" \$
+                    "${aria_args[@]}" \$
                     "${url}" > "${log}" 2>&1 || rc=$?
             else
                 local args=()
@@ -68,11 +68,11 @@ hf_xet_download() {
                 args+=(--include "${f}")
                 # HF_HUB_DISABLE_XET=1 forces the plain LFS path — avoids the
                 # known Xet CAS connection hang that blocks hf download forever.
-                HF_HUB_DISABLE_XET=1 hf download "${hf_repo}" --local-dir "${local_dir}" "${args[@]}" \\
+                HF_HUB_DISABLE_XET=1 hf download "${hf_repo}" --local-dir "${local_dir}" "${args[@]}" \$
                     > "${log}" 2>&1 || rc=$?
             fi
             if [[ ${rc} -ne 0 ]]; then
-                printf "FAILED rc=%s (see %s)\\n" "${rc}" "${log}" >&2
+                printf "FAILED rc=%s (see %s)\n" "${rc}" "${log}" >&2
             fi
             exit "${rc}"
         ) &
@@ -90,17 +90,17 @@ hf_xet_download() {
         wait "${pid}" || rc=$?
         if [[ ${rc} -ne 0 ]]; then
             failures=$((failures + 1))
-            printf "    FAILED pid=%s rc=%s (see /tmp/hf_xet_download.*.log)\\n" "${pid}" "${rc}"
+            printf "    FAILED pid=%s rc=%s (see /tmp/hf_xet_download.*.log)\n" "${pid}" "${rc}"
         else
             succeeded=$((succeeded + 1))
         fi
     done
 
-    printf "==> Downloads done: %d/%d succeeded, %d failed\\n" "${succeeded}" "$#" "${failures}"
+    printf "==> Downloads done: %d/%d succeeded, %d failed\n" "${succeeded}" "$#" "${failures}"
 
     # Fail only if ALL downloads failed (partial success leaves the node usable).
     if [[ ${succeeded} -eq 0 && $# -gt 0 ]]; then
-        printf "!! ALL downloads failed — check /tmp/hf_xet_download.*.log\\n" >&2
+        printf "!! ALL downloads failed — check /tmp/hf_xet_download.*.log\n" >&2
         return 1
     fi
     return 0
