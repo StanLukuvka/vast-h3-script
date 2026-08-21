@@ -54,11 +54,11 @@ hf_xet_download() {
                 if [[ -n "${HF_TOKEN:-}" ]]; then
                     aria_args+=(--header="Authorization: Bearer ${HF_TOKEN}")
                 fi
-                aria2c -x"${n_threads}" -s"${n_threads}" -k1M --continue=true \$
-                    --auto-file-renaming=false --allow-overwrite=false \$
-                    --retry-wait=30 \$
-                    --dir="$(dirname "${out_path}")" --out="$(basename "${out_path}")" \$
-                    "${aria_args[@]}" \$
+                aria2c -x"${n_threads}" -s"${n_threads}" -k1M --continue=true \
+                    --auto-file-renaming=false --allow-overwrite=false \
+                    --retry-wait=30 \
+                    --dir="$(dirname "${out_path}")" --out="$(basename "${out_path}")" \
+                    "${aria_args[@]}" \
                     "${url}" > "${log}" 2>&1 || rc=$?
             else
                 local args=()
@@ -68,7 +68,7 @@ hf_xet_download() {
                 args+=(--include "${f}")
                 # HF_HUB_DISABLE_XET=1 forces the plain LFS path — avoids the
                 # known Xet CAS connection hang that blocks hf download forever.
-                HF_HUB_DISABLE_XET=1 hf download "${hf_repo}" --local-dir "${local_dir}" "${args[@]}" \$
+                HF_HUB_DISABLE_XET=1 hf download "${hf_repo}" --local-dir "${local_dir}" "${args[@]}" \
                     > "${log}" 2>&1 || rc=$?
             fi
             if [[ ${rc} -ne 0 ]]; then
