@@ -5,16 +5,15 @@
 #   source hf_xet_download.sh
 #   hf_xet_download <repo_id> <local_dir> <file1> [file2 ...]
 #
-# Uses aria2c (parallel chunked + resumable) against HF's resolve URLs when
-# available — faster and more reliable than hf CLI's Xet path for large files.
-# Falls back to `hf download` if aria2c is missing.
-#
+# Uses wget -c (resumable single-stream) against HF's resolve URLs.
 # Each file gets its own background process; a failure on one file does NOT
-# abort the others. Override per-file chunk count via HF_XET_NUM_CONCURRENT_RANGE_GETS.
+# abort the others.
+#
+# For authenticated repos, set HF_TOKEN (Bearer auth header).
 
 hf_xet_download() {
     if [[ $# -lt 3 ]]; then
-        printf "hf_xet_download: usage: hf_xet_download <repo_id> <local_dir> <file1> [file2 ...]\n" >&2
+        printf "hf_xet_download: usage: hf_xet_download <repo_id> <local_dir> <file1> [file2 ...]\\n" >&2
         return 1
     fi
 
@@ -22,62 +21,32 @@ hf_xet_download() {
     local local_dir="$2"
     shift 2
 
-    local n_threads="${HF_XET_NUM_CONCURRENT_RANGE_GETS:-16}"
-
-    local has_aria2=no
-    local hf_bin="$(command -v hf || echo MISSING)"
-    if command -v aria2c >/dev/null 2>&1; then
-        has_aria2=yes
-    fi
-
-    if [[ "${has_aria2}" == "yes" ]]; then
-        printf "==> Downloading %d file(s) from %s to %s (engine: aria2c -x%d)\n" \
-            "$#" "${hf_repo}" "${local_dir}" "${n_threads}"
-    else
-        printf "==> Downloading %d file(s) from %s to %s (engine: hf CLI — aria2c not found)\n" \
-            "$#" "${hf_repo}" "${local_dir}"
-    fi
-    printf "    token: %s\n" "$([[ -n ${HF_TOKEN:-} ]] && echo set || echo none)"
-    printf "    aria2c: %s | hf: %s\n" "${has_aria2}" "${hf_bin}"
+    printf "==> Downloading %d file(s) from %s to %s\\n" \
+        "$#" "${hf_repo}" "${local_dir}"
+    printf "    token: %s\\n" "$([[ -n ${HF_TOKEN:-} ]] && echo set || echo none)"
 
     local pids=()
     local f
     for f in "$@"; do
         local log="/tmp/hf_xet_download.$(basename "${f}").log"
-        printf "    -> %s  (log: %s)\n" "${f}" "${log}"
+        printf "    -> %s  (log: %s)\\n" "${f}" "${log}"
         (
             mkdir -p "${local_dir}/$(dirname "${f}")"
             local out_path="${local_dir}/${f}"
             local url="https://huggingface.co/${hf_repo}/resolve/main/${f}"
             local rc=0
-            if [[ "${has_aria2}" == "yes" ]]; then
-                local aria_args=()
+            {
+                local wget_args=("-c" "-O" "${out_path}")
                 if [[ -n "${HF_TOKEN:-}" ]]; then
-                    aria_args+=(--header="Authorization: Bearer ${HF_TOKEN}")
+                    wget_args+=("-e" "http_proxy=" "-e" "https_proxy="
+                                "--header=Authorization: Bearer ${HF_TOKEN}")
+                else
+                    wget_args+=("-e" "http_proxy=" "-e" "https_proxy=")
                 fi
-                # Hard timeout per file; prevents infinite stalls on CDN
-                # range-request hangs (known with HF Xet). Some older aria2c
-                # versions don't support --max-time — if you see an error
-                # about unrecognized options, remove that line.
-                aria2c -x"${n_threads}" -s"${n_threads}" -k1M --continue=true \
-                    --auto-file-renaming=false --allow-overwrite=false \
-                    --retry-wait=30 \
-                    --dir="$(dirname "${out_path}")" --out="$(basename "${out_path}")" \
-                    "${aria_args[@]}" \
-                    "${url}" > "${log}" 2>&1 || rc=$?
-            else
-                local args=()
-                if [[ -n "${HF_TOKEN:-}" ]]; then
-                    args+=(--token "${HF_TOKEN}")
-                fi
-                args+=(--include "${f}")
-                # HF_HUB_DISABLE_XET=1 forces the plain LFS path — avoids the
-                # known Xet CAS connection hang that blocks hf download forever.
-                HF_HUB_DISABLE_XET=1 hf download "${hf_repo}" --local-dir "${local_dir}" "${args[@]}" \
-                    > "${log}" 2>&1 || rc=$?
-            fi
+                wget "${wget_args[@]}" "${url}"
+            } > "${log}" 2>&1 || rc=$?
             if [[ ${rc} -ne 0 ]]; then
-                printf "FAILED rc=%s (see %s)\n" "${rc}" "${log}" >&2
+                printf "FAILED rc=%s (see %s)\\n" "${rc}" "${log}" >&2
             fi
             exit "${rc}"
         ) &
@@ -95,17 +64,17 @@ hf_xet_download() {
         wait "${pid}" || rc=$?
         if [[ ${rc} -ne 0 ]]; then
             failures=$((failures + 1))
-            printf "    FAILED pid=%s rc=%s (see /tmp/hf_xet_download.*.log)\n" "${pid}" "${rc}"
+            printf "    FAILED pid=%s rc=%s (see /tmp/hf_xet_download.*.log)\\n" "${pid}" "${rc}"
         else
             succeeded=$((succeeded + 1))
         fi
     done
 
-    printf "==> Downloads done: %d/%d succeeded, %d failed\n" "${succeeded}" "$#" "${failures}"
+    printf "==> Downloads done: %d/%d succeeded, %d failed\\n" "${succeeded}" "$#" "${failures}"
 
     # Fail only if ALL downloads failed (partial success leaves the node usable).
     if [[ ${succeeded} -eq 0 && $# -gt 0 ]]; then
-        printf "!! ALL downloads failed — check /tmp/hf_xet_download.*.log\n" >&2
+        printf "!! ALL downloads failed — check /tmp/hf_xet_download.*.log\\n" >&2
         return 1
     fi
     return 0
