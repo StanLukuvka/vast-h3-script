@@ -5,11 +5,24 @@
 #   source hf_xet_download.sh
 #   hf_xet_download <repo_id> <local_dir> <file1> [file2 ...]
 #
-# Uses aria2c (parallel chunked + resumable) against HF's resolve URLs.
-# Falls back to `hf download` (with HF_HUB_DISABLE_XET=1) if aria2c is missing.
+# Uses `hf download` + Xet (HF_XET_HIGH_PERFORMANCE=1, 64 concurrent range
+# gets) as the fast primary path (~600 MB/s on fast links). Falls back to
+# aria2c (parallel chunked + resumable) if the hf CLI is missing or fails.
+#
+# !!! DO NOT REGRESS THIS !!!
+# Prior regression (d851d01, f9bbb8d): aria2c/plain-HTTP was made primary and
+# `HF_HUB_DISABLE_XET=1` was set on the hf fallback — that KILLED the Xet
+# fast path and everything dropped to ~16 MB/s per file (from 600 MB/s).
+# Rules that MUST hold:
+#   1. `hf download` (with xet) is ALWAYS the primary engine when present.
+#   2. HF_HUB_DISABLE_XET must NOT be set in the primary path.
+#   3. HF_XET_HIGH_PERFORMANCE=1 and HF_XET_NUM_CONCURRENT_RANGE_GETS (=64)
+#      must be exported before the hf download runs (the 600 MB/s source).
+#   4. aria2c is a FALLBACK only (hf missing, or hf download rc!=0).
 #
 # Each file gets its own background process; a failure on one file does NOT
-# abort the others. Override per-file chunk count via HF_XET_NUM_CONCURRENT_RANGE_GETS.
+# abort the others. Override per-file chunk count via
+# HF_XET_NUM_CONCURRENT_RANGE_GETS.
 
 hf_xet_download() {
     if [[ $# -lt 3 ]]; then
@@ -25,19 +38,26 @@ hf_xet_download() {
 
     local has_aria2=no
     local hf_bin="$(command -v hf || echo MISSING)"
+    local hf_available=no
+    if command -v hf >/dev/null 2>&1; then
+        hf_available=yes
+    fi
     if command -v aria2c >/dev/null 2>&1; then
         has_aria2=yes
     fi
 
-    if [[ "${has_aria2}" == "yes" ]]; then
-        printf "==> Downloading %d file(s) from %s to %s (engine: aria2c -x%d)\n" \
+    if [[ "${hf_available}" == "yes" ]]; then
+        printf "==> Downloading %d file(s) from %s to %s (engine: hf CLI + Xet, %d streams)\n" \
+            "$#" "${hf_repo}" "${local_dir}" "${n_threads}"
+    elif [[ "${has_aria2}" == "yes" ]]; then
+        printf "==> Downloading %d file(s) from %s to %s (engine: aria2c -x%d — hf CLI not found)\n" \
             "$#" "${hf_repo}" "${local_dir}" "${n_threads}"
     else
-        printf "==> Downloading %d file(s) from %s to %s (engine: hf CLI — aria2c not found)\n" \
+        printf "==> Downloading %d file(s) from %s to %s (engine: NONE — no hf CLI, no aria2c)\n" \
             "$#" "${hf_repo}" "${local_dir}"
     fi
     printf "    token: %s\n" "$([[ -n ${HF_TOKEN:-} ]] && echo set || echo none)"
-    printf "    aria2c: %s | hf: %s\n" "${has_aria2}" "${hf_bin}"
+    printf "    hf: %s | aria2c: %s\n" "${hf_bin}" "${has_aria2}"
 
     local pids=()
     local f
@@ -49,36 +69,40 @@ hf_xet_download() {
             local out_path="${local_dir}/${f}"
             local url="https://huggingface.co/${hf_repo}/resolve/main/${f}"
             local rc=0
-            if [[ "${has_aria2}" == "yes" ]]; then
-                local aria_args=()
-                if [[ -n "${HF_TOKEN:-}" ]]; then
-                    aria_args+=(--header="Authorization: Bearer ${HF_TOKEN}")
-                fi
-                # Tail-lull tuning:
-                #   -k8M         8MB segments instead of 1MB — ~8x fewer HTTP
-                #                range requests on the big files, so the tail
-                #                can't get stuck re-requesting tiny pieces.
-                #   --retry-wait=3  reconnect fast (was 30s). With 16 conns,
-                #                a 30s wait per dropped conn near the end
-                #                serialized into multi-minute stalls.
-                #   --file-allocation=none  skip valloc pre-pass.
-                aria2c -x"${n_threads}" -s"${n_threads}" -k8M --continue=true \
-                    --file-allocation=none \
-                    --auto-file-renaming=false --allow-overwrite=false \
-                    --retry-wait=3 \
-                    --dir="$(dirname "${out_path}")" --out="$(basename "${out_path}")" \
-                    "${aria_args[@]}" \
-                    "${url}" > "${log}" 2>&1 || rc=$?
-            else
-                local args=()
+            if [[ "${hf_available}" == "yes" ]]; then
+                local args=(--include "${f}" --local-dir "${local_dir}")
                 if [[ -n "${HF_TOKEN:-}" ]]; then
                     args+=(--token "${HF_TOKEN}")
                 fi
-                args+=(--include "${f}")
-                # HF_HUB_DISABLE_XET=1 forces the plain LFS path — avoids the
-                # known Xet CAS connection hang that blocks hf download forever.
-                HF_HUB_DISABLE_XET=1 hf download "${hf_repo}" --local-dir "${local_dir}" "${args[@]}" \
+                # Xet is the fast path (600+ MB/s with concurrent range gets).
+                # Do NOT set HF_HUB_DISABLE_XET here — that's the slow path.
+                export HF_XET_HIGH_PERFORMANCE=1
+                export HF_XET_NUM_CONCURRENT_RANGE_GETS="${HF_XET_NUM_CONCURRENT_RANGE_GETS:-64}"
+                hf download "${hf_repo}" "${args[@]}" \
                     > "${log}" 2>&1 || rc=$?
+            else
+                # no hf CLI at all — mark failed so the fallback engages
+                rc=1
+            fi
+            # Fallback: aria2c when hf is missing OR the hf/Xet path fails.
+            if [[ "${hf_available}" != "yes" || ${rc} -ne 0 ]]; then
+                if [[ "${has_aria2}" == "yes" ]]; then
+                    rc=0
+                    local aria_args=()
+                    if [[ -n "${HF_TOKEN:-}" ]]; then
+                        aria_args+=(--header="Authorization: Bearer ${HF_TOKEN}")
+                    fi
+                    aria2c -x"${n_threads}" -s"${n_threads}" -k8M --continue=true \
+                        --file-allocation=none \
+                        --auto-file-renaming=false --allow-overwrite=false \
+                        --retry-wait=3 \
+                        --dir="$(dirname "${out_path}")" --out="$(basename "${out_path}")" \
+                        "${aria_args[@]}" \
+                        "${url}" > "${log}" 2>&1 || rc=$?
+                else
+                    # Nothing to fall back to — leave rc from hf.
+                    true
+                fi
             fi
             if [[ ${rc} -ne 0 ]]; then
                 printf "FAILED rc=%s (see %s)\n" "${rc}" "${log}" >&2
