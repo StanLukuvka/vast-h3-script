@@ -54,9 +54,18 @@ hf_xet_download() {
                 if [[ -n "${HF_TOKEN:-}" ]]; then
                     aria_args+=(--header="Authorization: Bearer ${HF_TOKEN}")
                 fi
-                aria2c -x"${n_threads}" -s"${n_threads}" -k1M --continue=true \
+                # Tail-lull tuning:
+                #   -k8M         8MB segments instead of 1MB — ~8x fewer HTTP
+                #                range requests on the big files, so the tail
+                #                can't get stuck re-requesting tiny pieces.
+                #   --retry-wait=3  reconnect fast (was 30s). With 16 conns,
+                #                a 30s wait per dropped conn near the end
+                #                serialized into multi-minute stalls.
+                #   --file-allocation=none  skip valloc pre-pass.
+                aria2c -x"${n_threads}" -s"${n_threads}" -k8M --continue=true \
+                    --file-allocation=none \
                     --auto-file-renaming=false --allow-overwrite=false \
-                    --retry-wait=30 \
+                    --retry-wait=3 \
                     --dir="$(dirname "${out_path}")" --out="$(basename "${out_path}")" \
                     "${aria_args[@]}" \
                     "${url}" > "${log}" 2>&1 || rc=$?
