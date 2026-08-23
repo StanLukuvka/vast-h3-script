@@ -41,9 +41,47 @@ _hf_ts() { date '+%H:%M:%S'; }
 
 # $1 path, $2 name — bytes currently on disk (Xet writes NAME.incomplete).
 _hf_cur_size() {
+    local dest="$1"
+    local name="${2:-}"
+    local local_dir="${3:-}"
+    local rel="${4:-}"
     local total=0 s=0
-    if [[ -f "$1" ]]; then s=$(stat -c %s "$1" 2>/dev/null || echo 0); total=$((total + s)); fi
-    if [[ -f "$1.incomplete" ]]; then s=$(stat -c %s "$1.incomplete" 2>/dev/null || echo 0); total=$((total + s)); fi
+    if [[ -f "$dest" ]]; then s=$(stat -c %s "$dest" 2>/dev/null || echo 0); total=$((total + s)); fi
+    if [[ -f "$dest.incomplete" ]]; then s=$(stat -c %s "$dest.incomplete" 2>/dev/null || echo 0); total=$((total + s)); fi
+    # hf download --local-dir writes to a hashed temp under .cache/huggingface/download/
+    #   incomplete_path = .cache/huggingface/download/<subdir>/<hash>.<etag>.incomplete
+    #   where hash = base64(sha1("<basename>.metadata"))
+    # We don't have etag in bash, so glob for hash.*.incomplete
+    if [[ -n "$local_dir" && -n "$name" ]]; then
+        local cache_root="${local_dir}/.cache/huggingface/download"
+        if [[ -d "$cache_root" ]]; then
+            local hash=""
+            hash=$(python3 -c 'import base64,hashlib,sys; print(base64.urlsafe_b64encode(hashlib.sha1(sys.argv[1].encode()).digest()).decode())' "${name}.metadata" 2>/dev/null || echo "")
+            if [[ -n "$hash" ]]; then
+                # find any file matching hash.*.incomplete (etag is variable)
+                local found
+                found=$(find "$cache_root" -name "${hash}.*.incomplete" -type f 2>/dev/null | head -5)
+                for f in $found; do
+                    [[ -f "$f" ]] || continue
+                    s=$(stat -c %s "$f" 2>/dev/null || echo 0)
+                    total=$((total + s))
+                done
+            fi
+        fi
+        # Also account for Xet shard cache (HF_XET_CACHE) — its growth is not per-file but we add to total if dest still 0
+        # This makes the PROG line move even before the hashed incomplete appears
+        if [[ $total -eq 0 ]]; then
+            local xet_cache="${HF_XET_CACHE:-${HF_HOME:-/root/.cache/huggingface}/xet}"
+            if [[ -d "$xet_cache" ]]; then
+                # Use du as fallback — sum is shared across files, but better than 0
+                s=$(du -sb "$xet_cache" 2>/dev/null | cut -f1)
+                # Only count if sizable (>1M)
+                if [[ -n "$s" && "$s" -gt 1048576 ]]; then
+                    total=$s
+                fi
+            fi
+        fi
+    fi
     echo "${total}"
 }
 
@@ -161,7 +199,7 @@ hf_xet_download() {
             t1_ms=$(date +%s%3N)
             local dur_ms=$((t1_ms - t0_ms))
             local size_b
-            size_b=$(_hf_cur_size "${out_path}" "${name}")
+            size_b=$(_hf_cur_size "${out_path}" "${name}" "${local_dir}" "${f}")
             printf 'DURATION_MS=%s\nSIZE=%s\nENGINE=%s\nRC=%s\n' \
                 "${dur_ms}" "${size_b}" "${used_engine}" "${rc}" > "${done_file}"
 
@@ -177,7 +215,7 @@ hf_xet_download() {
     local pids_joined
     pids_joined="$(printf '%s ' "${pids[@]}")"
     (
-        sleep 15
+        sleep 5
         declare -A prev 2>/dev/null || true
         while read -r f; do
             [[ -z "${f}" ]] && continue
@@ -203,7 +241,7 @@ hf_xet_download() {
                 expect_path="/tmp/hf_xet_expect.${tag}.${name}"
                 local expect=$([[ -s "${expect_path}" ]] && cat "${expect_path}" || echo 0)
                 local cur
-                cur=$(_hf_cur_size "${local_dir}/${f}" "${name}")
+                cur=$(_hf_cur_size "${local_dir}/${f}" "${name}" "${local_dir}" "${f}")
                 local delta=$((cur - ${prev["${f}"]}))
                 local dt=$((now - prev_time))
                 local rate_win=0 rate_avg=0 pct=0
@@ -217,7 +255,7 @@ hf_xet_download() {
                     "$(_hf_human "${rate_win}")" "$(_hf_human "${rate_avg}")"
             done < "${files_file}"
             prev_time=${now}
-            sleep 15
+            sleep 5
         done
     ) &
     local mon_pid=$!
