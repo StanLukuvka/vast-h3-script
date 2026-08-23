@@ -1,6 +1,16 @@
 #!/bin/bash
 set -euo pipefail
 
+# Vast.ai writes instance env vars (e.g. -e HF_TOKEN=...) to /etc/environment
+# inside the container, but the provisioning process sometimes runs without
+# them exported. Load them explicitly so tokens reach the downloaders.
+if [[ -f /etc/environment ]]; then
+    set -a
+    # shellcheck source=/dev/null
+    source /etc/environment
+    set +a
+fi
+
 source /venv/main/bin/activate
 COMFYUI_DIR="${WORKSPACE:-/workspace}/ComfyUI"
 
