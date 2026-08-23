@@ -14,6 +14,18 @@ fi
 source /venv/main/bin/activate
 COMFYUI_DIR="${WORKSPACE:-/workspace}/ComfyUI"
 
+# ---------------------------------------------------------------------------
+# CONFIG — loaded from PROVISIONING_CONFIG (env URL) at runtime
+# ---------------------------------------------------------------------------
+# Two-stage flow:
+#   PROVISIONING_SCRIPT  = default.sh   (this file, the provisioner)
+#   PROVISIONING_CONFIG  = config.json  (public, in repo — declares downloads/models/modules)
+# Vast template sets both via --env. We fetch CONFIG at boot so the repo is
+# the single source of truth; no hardcoded model lists here.
+PROVISIONING_CONFIG_URL="${PROVISIONING_CONFIG:-${CONFIG_URL:-}}"
+DEFAULT_CONFIG_URL="https://raw.githubusercontent.com/StanLukuvka/vast-h3-script/main/config.json"
+CONFIG_LOCAL="/tmp/provisioning_config.json"
+
 # Vast base image may leave these unset; declare them so `set -u` doesn't abort.
 declare -a APT_PACKAGES=()
 declare -a PIP_PACKAGES=()
@@ -99,11 +111,13 @@ function provisioning_start() {
     printf "==> Provisioning started\n"
     provisioning_print_header
     provisioning_get_apt_packages
+    # Load config before nodes/models so modules + downloads settings apply
+    provisioning_load_config || true
+    provisioning_apply_config || true
     provisioning_get_nodes
     provisioning_get_pip_packages
-    printf "==> Downloading H3 weights\n"
-    provisioning_get_h3_weights
-    printf "==> H3 weights download finished (rc=%s)\n" "$?"
+    provisioning_get_models
+    printf "==> Model download phase finished (rc=%s)\n" "$?"
     provisioning_get_files \
         "${COMFYUI_DIR}/models/checkpoints" \
         "${CHECKPOINT_MODELS[@]}"
@@ -123,6 +137,223 @@ function provisioning_start() {
         "${COMFYUI_DIR}/models/esrgan" \
         "${ESRGAN_MODELS[@]}"
     provisioning_print_end
+}
+
+# ---------------------------------------------------------------------------
+# Config loader — fetches PROVISIONING_CONFIG into $CONFIG_LOCAL and
+# populates NODES / models via python3. No jq dependency.
+# ---------------------------------------------------------------------------
+provisioning_load_config() {
+    local url=""
+    if [[ -n "${PROVISIONING_CONFIG_URL:-}" ]]; then
+        url="${PROVISIONING_CONFIG_URL}"
+    elif [[ -n "${PROVISIONING_CONFIG:-}" ]]; then
+        url="${PROVISIONING_CONFIG}"
+    fi
+
+    if [[ "${url}" == "{"* ]]; then
+        printf "%s" "${url}" > "${CONFIG_LOCAL}"
+        printf "==> PROVISIONING_CONFIG is inline JSON (%s bytes)\n" "$(wc -c < "${CONFIG_LOCAL}")"
+        return 0
+    fi
+
+    if [[ -n "${url}" ]]; then
+        if [[ "${url}" =~ ^https?:// ]]; then
+            printf "==> Fetching provisioning config from %s\n" "${url}"
+            if ! curl -fsSL "${url}" -o "${CONFIG_LOCAL}" 2>/tmp/config_curl_err.log; then
+                printf "!! WARN: failed to fetch PROVISIONING_CONFIG (%s) — will try fallback\n" "${url}" >&2
+                cat /tmp/config_curl_err.log 2>/dev/null | head -20 >&2 || true
+                url=""
+            elif [[ ! -s "${CONFIG_LOCAL}" ]]; then
+                printf "!! WARN: fetched config is empty — will try fallback\n" >&2
+                url=""
+            else
+                printf "==> Config fetched OK (%s bytes) from %s\n" "$(wc -c < "${CONFIG_LOCAL}")" "${url}"
+                return 0
+            fi
+        elif [[ -f "${url}" ]]; then
+            printf "==> Using local provisioning config %s\n" "${url}"
+            cp "${url}" "${CONFIG_LOCAL}"
+            return 0
+        else
+            printf "!! WARN: PROVISIONING_CONFIG=%s is not a URL or file — will try fallback\n" "${url}" >&2
+            url=""
+        fi
+    fi
+
+    local sibling=""
+    for cand in "$(dirname "${BASH_SOURCE[0]:-}")/config.json" "./config.json" "/workspace/vast-h3-script/config.json"; do
+        if [[ -f "${cand}" ]]; then sibling="${cand}"; break; fi
+    done
+    if [[ -n "${sibling}" ]]; then
+        printf "==> Using sibling config %s\n" "${sibling}"
+        cp "${sibling}" "${CONFIG_LOCAL}"
+        return 0
+    fi
+
+    printf "==> Fetching default config from %s\n" "${DEFAULT_CONFIG_URL}"
+    if curl -fsSL "${DEFAULT_CONFIG_URL}" -o "${CONFIG_LOCAL}" 2>/tmp/config_curl_err.log; then
+        if [[ -s "${CONFIG_LOCAL}" ]]; then
+            printf "==> Default config fetched OK (%s bytes)\n" "$(wc -c < "${CONFIG_LOCAL}")"
+            return 0
+        fi
+    fi
+    printf "!! WARN: no provisioning config available — using hardcoded fallback\n" >&2
+    cat /tmp/config_curl_err.log 2>/dev/null | head -20 >&2 || true
+    return 1
+}
+
+provisioning_apply_config() {
+    if [[ ! -f "${CONFIG_LOCAL}" ]]; then
+        printf "!! provisioning_apply_config: no %s — skipping\n" "${CONFIG_LOCAL}" >&2
+        return 1
+    fi
+    if ! python3 -m json.tool "${CONFIG_LOCAL}" >/dev/null 2>&1; then
+        printf "!! provisioning_apply_config: %s is not valid JSON — skipping\n" "${CONFIG_LOCAL}" >&2
+        head -20 "${CONFIG_LOCAL}" >&2 || true
+        return 1
+    fi
+
+    local py_out
+    py_out=$(python3 << 'PYEOF'
+import json, shlex, pathlib
+cfg = json.loads(pathlib.Path("/tmp/provisioning_config.json").read_text())
+for d in cfg.get("downloads", []):
+    engine = d.get("engine", "")
+    settings = d.get("settings", {})
+    if engine == "xet":
+        if settings.get("high_performance"):
+            print("export HF_XET_HIGH_PERFORMANCE=1")
+        n = settings.get("concurrent_range_gets")
+        if n is not None:
+            print(f"export HF_XET_NUM_CONCURRENT_RANGE_GETS={int(n)}")
+for k, v in cfg.get("env", {}).items():
+    if k.replace("_","").isalnum():
+        print(f"export {k}={shlex.quote(str(v))}")
+mods = cfg.get("modules", [])
+if mods:
+    nodes = []
+    for m in mods:
+        url = m.get("url","")
+        branch = m.get("branch","")
+        if branch and "${" not in branch and "@" not in url:
+            nodes.append(f"{url}@{branch}")
+        else:
+            if branch:
+                nodes.append(f"{url}@{branch}")
+            else:
+                nodes.append(url)
+    quoted = " ".join(shlex.quote(n) for n in nodes)
+    print(f"NODES=({quoted})")
+PYEOF
+)
+    if [[ -n "${py_out}" ]]; then
+        printf "==> Applying config env/modules:\n"
+        printf "%s\n" "${py_out}" | sed 's/^/    /'
+        eval "${py_out}"
+    fi
+
+    local n_models
+    n_models=$(python3 -c "import json,pathlib; print(len(json.loads(pathlib.Path('/tmp/provisioning_config.json').read_text()).get('models',[])))")
+    printf "==> Config: %s model(s), %s module(s)\n" "${n_models}" "${#NODES[@]}"
+}
+
+# Generic provider-agnostic model fetcher driven by config.json models[].
+# Each entry: {provider, url, path, engine}
+provisioning_get_models() {
+    if [[ ! -f "${CONFIG_LOCAL}" ]]; then
+        printf "!! provisioning_get_models: no config — falling back to hardcoded H3 weights\n" >&2
+        provisioning_get_h3_weights
+        return $?
+    fi
+
+    if ! python3 -c "import json,pathlib,sys; json.loads(pathlib.Path('${CONFIG_LOCAL}').read_text())" 2>/dev/null; then
+        printf "!! provisioning_get_models: invalid JSON — fallback\n" >&2
+        provisioning_get_h3_weights
+        return $?
+    fi
+
+    local tsv="/tmp/provisioning_models.tsv"
+    python3 << 'PYEOF' > "${tsv}"
+import json, pathlib
+cfg = json.loads(pathlib.Path("/tmp/provisioning_config.json").read_text())
+for m in cfg.get("models", []):
+    provider = m.get("provider","url")
+    url = m.get("url","")
+    path = m.get("path","")
+    engine = m.get("engine","xet")
+    print(f"{provider}\t{url}\t{path}\t{engine}")
+PYEOF
+
+    if [[ ! -s "${tsv}" ]]; then
+        printf "==> No models in config — nothing to download\n"
+        return 0
+    fi
+
+    printf "==> Downloading %s model(s) from config\n" "$(wc -l < "${tsv}")"
+
+    declare -A xet_groups
+    declare -a generic_queue
+
+    while IFS=$'\t' read -r provider url path engine; do
+        [[ -z "${url}" || -z "${path}" ]] && continue
+        if [[ "${provider}" == "huggingface" && "${engine}" == "xet" && "${url}" == *"huggingface.co/"*"/resolve/"* ]]; then
+            repo=$(printf "%s" "${url}" | sed -E 's|.*huggingface\.co/([^/]+/[^/]+)/resolve/.*|\1|')
+            file=$(printf "%s" "${url}" | sed -E 's|.*/resolve/[^/]+/||')
+            if [[ "${file}" == "${url}" ]]; then file="${path}"; fi
+            if [[ -z "${xet_groups[${repo}]:-}" ]]; then
+                xet_groups["${repo}"]="${file}"
+            else
+                xet_groups["${repo}"]+=$'\n'"${file}"
+            fi
+        else
+            generic_queue+=("${provider}	${url}	${path}	${engine}")
+        fi
+    done < "${tsv}"
+
+    for repo in "${!xet_groups[@]}"; do
+        mapfile -t files <<< "${xet_groups[${repo}]}"
+        printf "==> Xet: %s (%d file(s)) -> %s\n" "${repo}" "${#files[@]}" "${COMFYUI_DIR}/models"
+        hf_xet_download "${repo}" "${COMFYUI_DIR}/models" "${files[@]}" || {
+            printf "!! WARN: hf_xet_download failed for %s — continuing\n" "${repo}" >&2
+        }
+    done
+
+    for entry in "${generic_queue[@]:-}"; do
+        IFS=$'\t' read -r provider url path engine <<< "${entry}"
+        dest_dir="${COMFYUI_DIR}/models/$(dirname "${path}")"
+        dest_file="${COMFYUI_DIR}/models/${path}"
+        mkdir -p "${dest_dir}"
+        if [[ -f "${dest_file}" && -s "${dest_file}" ]]; then
+            printf "==> SKIP (already exists): %s\n" "${path}"
+            continue
+        fi
+        printf "==> GET [%s/%s] %s -> %s\n" "${provider}" "${engine}" "${url}" "${path}"
+        auth_token=""
+        if [[ "${provider}" == "huggingface" && -n "${HF_TOKEN:-}" ]]; then
+            auth_token="${HF_TOKEN}"
+        elif [[ "${provider}" == "civitai" && -n "${CIVITAI_TOKEN:-}" ]]; then
+            auth_token="${CIVITAI_TOKEN}"
+        elif [[ "${provider}" == "huggingface" && -n "${HUGGING_FACE_HUB_TOKEN:-}" ]]; then
+            auth_token="${HUGGING_FACE_HUB_TOKEN}"
+        fi
+
+        if [[ "${engine}" == "aria2" ]] && command -v aria2c >/dev/null 2>&1; then
+            aria_args=(-x16 -s16 -k8M --continue=true --file-allocation=none --auto-file-renaming=false --allow-overwrite=false --retry-wait=3 --console-log-level=warn --dir="${dest_dir}" --out="$(basename "${path}")")
+            if [[ -n "${auth_token}" ]]; then aria_args+=(--header="Authorization: Bearer ${auth_token}"); fi
+            aria2c "${aria_args[@]}" "${url}" || provisioning_download "${url}" "${dest_dir}"
+        else
+            provisioning_download "${url}" "${dest_dir}"
+            if [[ ! -f "${dest_file}" ]]; then
+                newest=$(ls -t "${dest_dir}" 2>/dev/null | head -1)
+                if [[ -n "${newest}" && -f "${dest_dir}/${newest}" ]]; then
+                    if [[ "${newest}" != "$(basename "${path}")" ]]; then
+                        mv "${dest_dir}/${newest}" "${dest_file}" 2>/dev/null || cp "${dest_dir}/${newest}" "${dest_file}" 2>/dev/null || true
+                    fi
+                fi
+            fi
+        fi
+    done
 }
 
 function provisioning_get_apt_packages() {
