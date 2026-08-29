@@ -6,19 +6,15 @@
 #   hf_xet_download <repo_id> <local_dir> <file1> [file2 ...]
 #
 # Uses `hf download` + Xet (HF_XET_HIGH_PERFORMANCE=1, 64 concurrent range
-# gets) as the fast primary path (~600 MB/s on fast links). Falls back to
-# aria2c (parallel chunked + resumable) if the hf CLI is missing or fails.
+# gets) as the SOLE engine (~600 MB/s on fast links). If the `hf` CLI is
+# missing or the Xet path fails, the file aborts — no fallback to aria2c
+# or any other engine. Either the Xet path works or the download fails loud.
 #
-# !!! DO NOT REGRESS THIS !!!
-# Prior regression (d851d01, f9bbb8d): aria2c/plain-HTTP was made primary and
-# `HF_HUB_DISABLE_XET=1` was set on the hf fallback — that KILLED the Xet
-# fast path and everything dropped to ~16 MB/s per file (from 600 MB/s).
 # Rules that MUST hold:
-#   1. `hf download` (with xet) is ALWAYS the primary engine when present.
-#   2. HF_HUB_DISABLE_XET must NOT be set in the primary path.
+#   1. `hf download` (with xet) is the only engine.
+#   2. HF_HUB_DISABLE_XET must NOT be set (that would be the slow path).
 #   3. HF_XET_HIGH_PERFORMANCE=1 and HF_XET_NUM_CONCURRENT_RANGE_GETS (=64)
 #      must be exported before the hf download runs (the 600 MB/s source).
-#   4. aria2c is a FALLBACK only (hf missing, or hf download rc!=0).
 #
 # Logging (v2):
 #   - Every console line carries an [HH:MM:SS] timestamp so wall-clock gaps
@@ -96,25 +92,20 @@ hf_xet_download() {
     shift 2
     local files=("$@")
 
-    local n_threads="${HF_XET_NUM_CONCURRENT_RANGE_GETS:-16}"
-
-    local has_aria2=no
-    command -v aria2c >/dev/null 2>&1 && has_aria2=yes
     local hf_bin
     hf_bin="$(command -v hf || echo MISSING)"
     local hf_available=no
     command -v hf >/dev/null 2>&1 && hf_available=yes
 
     local engine_label
-    if [[ "${hf_available}" == "yes" ]]; then engine_label="hf CLI + Xet"
-    elif [[ "${has_aria2}" == "yes" ]]; then engine_label="aria2c (no hf CLI)"
-    else engine_label="NONE — no hf CLI, no aria2c"; fi
+    if [[ "${hf_available}" == "yes" ]]; then engine_label="hf CLI + Xet (sole engine)"
+    else engine_label="MISSING — hf CLI not installed"; fi
 
     printf "[%s] ==> Downloading %d file(s) from %s to %s\n" \
         "$(_hf_ts)" "$#" "${hf_repo}" "${local_dir}"
-    printf "[%s]     engine: %s | token: %s | hf: %s | aria2c: %s\n" \
+    printf "[%s]     engine: %s | token: %s | hf: %s\n" \
         "$(_hf_ts)" "${engine_label}" \
-        "$([[ -n ${HF_TOKEN:-} ]] && echo set || echo none)" "${hf_bin}" "${has_aria2}"
+        "$([[ -n ${HF_TOKEN:-} ]] && echo set || echo none)" "${hf_bin}"
 
     local tag="$$"
     local pids_file="/tmp/hf_xet_pids.${tag}"
@@ -157,7 +148,13 @@ hf_xet_download() {
             local rc=0
             local used_engine="none"
 
-            if [[ "${hf_available}" == "yes" ]]; then
+            # `hf` CLI + Xet is the only engine. Either it works or the file
+            # fails loud. No aria2c / wget / hf_transfer fallback.
+            if [[ "${hf_available}" != "yes" ]]; then
+                printf "[%s]     !! FAIL %s — hf CLI not installed (no fallback)\n" \
+                    "$(_hf_ts)" "${f}" >> "${log}"
+                rc=1
+            else
                 local args=(--include "${f}" --local-dir "${local_dir}")
                 if [[ -n "${HF_TOKEN:-}" ]]; then
                     args+=(--token "${HF_TOKEN}")
@@ -171,28 +168,6 @@ hf_xet_download() {
                 export HF_XET_NUM_CONCURRENT_RANGE_GETS="${HF_XET_NUM_CONCURRENT_RANGE_GETS:-64}"
                 hf download "${hf_repo}" "${args[@]}" > "${log}" 2>&1 || rc=$?
                 [[ ${rc} -eq 0 ]] && used_engine="hf-xet"
-            else
-                rc=1
-            fi
-
-            # Fallback: aria2c when hf is missing OR the hf/Xet path fails.
-            if [[ "${hf_available}" != "yes" || ${rc} -ne 0 ]]; then
-                if [[ "${has_aria2}" == "yes" ]]; then
-                    rc=0
-                    local aria_args=()
-                    if [[ -n "${HF_TOKEN:-}" ]]; then
-                        aria_args+=(--header="Authorization: Bearer ${HF_TOKEN}")
-                    fi
-                    printf -- "----- fallback: hf path failed (rc pre-fallback), trying aria2c -----\n" >> "${log}"
-                    aria2c -x"${n_threads}" -s"${n_threads}" -k8M --continue=true \
-                        --file-allocation=none \
-                        --auto-file-renaming=false --allow-overwrite=false \
-                        --retry-wait=3 --console-log-level=warn \
-                        --dir="${out_dir}" --out="${name}" \
-                        "${aria_args[@]}" \
-                        "${url}" >> "${log}" 2>&1 || rc=$?
-                    [[ ${rc} -eq 0 ]] && used_engine="aria2c"
-                fi
             fi
 
             local t1_ms

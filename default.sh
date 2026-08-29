@@ -693,42 +693,21 @@ function provisioning_has_valid_hf_token() {
     [[ -n "${HF_TOKEN:-}${HUGGING_FACE_HUB_TOKEN:-}" ]] || return 1
     local hf_token_val="${HF_TOKEN:-${HUGGING_FACE_HUB_TOKEN:-}}"
     local api_url="https://huggingface.co/api/whoami-v2"
-    local response
-    response=$(curl -o /dev/null -s -w "%{http_code}" -X GET "${api_url}" \
+    local http_status
+    http_status=$(curl -o /dev/null -s -w "%{http_code}" -X GET "${api_url}" \
         -H "Authorization: Bearer ${hf_token_val}" \
         -H "Content-Type: application/json")
-    [[ "${response}" -eq 200 ]]
+    [[ "${http_status}" -eq 200 ]]
 }
 
 function provisioning_has_valid_civitai_token() {
     [[ -n "${CIVITAI_TOKEN:-}" ]] || return 1
-    url="https://civitai.com/api/v1/models?hidden=1&limit=1"
-
-    response=$(curl -o /dev/null -s -w "%{http_code}" -X GET "$url" \
+    local api_url="https://civitai.com/api/v1/models?hidden=1&limit=1"
+    local http_status
+    http_status=$(curl -o /dev/null -s -w "%{http_code}" -X GET "${api_url}" \
         -H "Authorization: Bearer ${CIVITAI_TOKEN}" \
         -H "Content-Type: application/json")
-
-    # Check if the token is valid
-    if [ "$response" -eq 200 ]; then
-        return 0
-    else
-        return 1
-    fi
-}
-
-# Download from $1 URL to $2 file path
-function provisioning_download() {
-    if [[ -n "${HF_TOKEN:-}" && $1 =~ ^https://([a-zA-Z0-9_-]+\.)?huggingface\.co(/|$|\?) ]]; then
-        auth_token="$HF_TOKEN"
-    elif 
-        [[ -n "${CIVITAI_TOKEN:-}" && $1 =~ ^https://([a-zA-Z0-9_-]+\.)?civitai\.com(/|$|\?) ]]; then
-        auth_token="$CIVITAI_TOKEN"
-    fi
-    if [[ -n $auth_token ]];then
-        wget --header="Authorization: Bearer $auth_token" -qnc --content-disposition --show-progress -e dotbytes="${3:-4M}" -P "$2" "$1"
-    else
-        wget -qnc --content-disposition --show-progress -e dotbytes="${3:-4M}" -P "$2" "$1"
-    fi
+    [[ "${http_status}" -eq 200 ]]
 }
 
 # ---------------------------------------------------------------------------
