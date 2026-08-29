@@ -1,0 +1,225 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://raw.githubusercontent.com/StanLukuvka/vast-h3-script/main/config.schema.json",
+    "title": "vast-h3 provisioning config",
+    "description": "Schema for config.json consumed by default.sh. Each field maps to a specific behavior in the provisioning pipeline. See README.md for the runtime flow.",
+    "type": "object",
+    "required": ["schema_version", "models", "modules"],
+    "additionalProperties": false,
+    "properties": {
+        "$schema": {
+            "description": "URI of this schema file. Standard JSON Schema reference; ignored by default.sh at runtime. Set to './config.schema.json' for local files, or the raw.githubusercontent.com URL when fetching config.json from a remote.",
+            "type": "string"
+        },
+        "schema_version": {
+            "description": "Integer version of the config schema this document conforms to. Bump on breaking changes; default.sh can refuse to load a config with a higher version than it knows about.",
+            "type": "integer",
+            "const": 2
+        },
+        "comfyui": {
+            "description": "Optional metadata describing the ComfyUI base image and how it should be launched. Documentation only — the launch flags and dir are read from environment variables at runtime (COMFYUI_DIR, COMFYUI_ARGS), not from this block.",
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "image": {
+                    "description": "Vast base image tag. Reference only; not pulled by default.sh.",
+                    "type": "string"
+                },
+                "dir": {
+                    "description": "Where ComfyUI is installed. Set COMFYUI_DIR env var to override (default: /workspace/ComfyUI).",
+                    "type": "string"
+                },
+                "port": {
+                    "description": "Port the ComfyUI web UI listens on. Reference only.",
+                    "type": "integer"
+                },
+                "launch_args": {
+                    "description": "COMFYUI_ARGS passed to the base-image supervisor. Must include --lowvram for VRAM < 32GB (preflight forces this automatically).",
+                    "type": "string"
+                }
+            }
+        },
+        "huggingface": {
+            "description": "Per-engine download settings for Hugging Face models. Each entry sets env vars for one HF download engine. Models reference an engine by name (see models[].engine).",
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "downloads": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                        "type": "object",
+                        "required": ["engine"],
+                        "additionalProperties": false,
+                        "properties": {
+                            "engine": {
+                                "description": "Which HF download engine this entry configures. Models point to this name via models[].engine.",
+                                "type": "string",
+                                "enum": ["xet", "hf_hub"]
+                            },
+                            "settings": {
+                                "type": "object",
+                                "description": "Engine-specific knobs. Keys depend on engine: xet understands high_performance and concurrent_range_gets; hf_hub has no settings.",
+                                "additionalProperties": false,
+                                "properties": {
+                                    "high_performance": {
+                                        "description": "(xet) Set HF_XET_HIGH_PERFORMANCE=1 — skips Xet's adaptive ramp-up, locks to peak concurrency immediately.",
+                                        "type": "boolean"
+                                    },
+                                    "concurrent_range_gets": {
+                                        "description": "(xet) HF_XET_NUM_CONCURRENT_RANGE_GETS — parallel HTTP range fetches per file. 64 is a sane default for a 1 Gbit pipe; raise on faster links.",
+                                        "type": "integer",
+                                        "minimum": 1,
+                                        "maximum": 256
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "models": {
+            "description": "Models to download. Each entry is dispatched to the provider matching its source field (providers/<source>.sh). All four sources are listed below; use one per entry.",
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": ["source"],
+                "oneOf": [
+                    {
+                        "description": "Hugging Face model pulled from a repo. Choose engine 'xet' (default, fastest, ~600 MB/s) or 'hf_hub' (sequential, resumable, works on private/gated).",
+                        "type": "object",
+                        "required": ["source", "repo", "files"],
+                        "additionalProperties": false,
+                        "properties": {
+                            "source": {"const": "huggingface"},
+                            "repo": {
+                                "description": "Hugging Face repo id, e.g. 'Comfy-Org/MiniMax-H3' or 'private-org/private-repo'.",
+                                "type": "string",
+                                "pattern": "^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$"
+                            },
+                            "files": {
+                                "description": "Files within the repo to download. Paths are relative to the repo root. Spaces and most shell metacharacters are fine; quote if in doubt.",
+                                "type": "array",
+                                "minItems": 1,
+                                "items": {"type": "string", "minLength": 1}
+                            },
+                            "engine": {
+                                "description": "Which HF download engine to use. 'xet' is the default and is what you want unless the repo is private/gated and xet returns 401 (then 'hf_hub').",
+                                "type": "string",
+                                "enum": ["xet", "hf_hub"],
+                                "default": "xet"
+                            }
+                        }
+                    },
+                    {
+                        "description": "CivitAI checkpoint. Downloaded via aria2c with 'Authorization: Bearer ${CIVITAI_TOKEN}' (must be set in Vast env).",
+                        "type": "object",
+                        "required": ["source", "url", "path"],
+                        "additionalProperties": false,
+                        "properties": {
+                            "source": {"const": "civitai"},
+                            "url": {
+                                "description": "CivitAI download URL (the resolved one from the model page, not the page URL).",
+                                "type": "string",
+                                "format": "uri"
+                            },
+                            "path": {
+                                "description": "Destination path under ${COMFYUI_DIR}/models/. Subdirectory is preserved (e.g. 'checkpoints/foo.safetensors' -> models/checkpoints/foo.safetensors).",
+                                "type": "string",
+                                "minLength": 1
+                            }
+                        }
+                    },
+                    {
+                        "description": "Plain HTTP/HTTPS URL. Downloaded via aria2c with no auth header.",
+                        "type": "object",
+                        "required": ["source", "url", "path"],
+                        "additionalProperties": false,
+                        "properties": {
+                            "source": {"const": "url"},
+                            "url": {
+                                "description": "Direct download URL. aria2c with 16 connections, 16 splits, 8M min block.",
+                                "type": "string",
+                                "format": "uri"
+                            },
+                            "path": {
+                                "description": "Destination path under ${COMFYUI_DIR}/models/.",
+                                "type": "string",
+                                "minLength": 1
+                            }
+                        }
+                    }
+                ]
+            }
+        },
+        "modules": {
+            "description": "Custom nodes / plugins to install via git clone. Each entry is cloned into ${COMFYUI_DIR}/custom_nodes/ and pip-installed if it has a requirements.txt.",
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": ["url"],
+                "additionalProperties": false,
+                "properties": {
+                    "url": {
+                        "description": "Git URL. Use 'url@branch' shorthand (e.g. 'https://github.com/x/y@dev') OR pair with the 'branch' field.",
+                        "type": "string",
+                        "minLength": 1
+                    },
+                    "branch": {
+                        "description": "Git branch/tag to check out. Optional — defaults to the repo's default branch. May contain env-var-style defaults like '${SPEED_BRANCH:-main}' which are evaluated at clone time.",
+                        "type": "string"
+                    }
+                }
+            }
+        },
+        "env": {
+            "description": "Extra env vars to export before any download. Keys are variable names; values are strings. Existing env (HF_TOKEN, CIVITAI_TOKEN, etc.) is NOT overridden by this block — set those in the Vast UI instead.",
+            "type": "object",
+            "additionalProperties": {
+                "type": "string"
+            }
+        }
+    },
+    "examples": [
+        {
+            "schema_version": 2,
+            "huggingface": {
+                "downloads": [
+                    {"engine": "xet", "settings": {"high_performance": true, "concurrent_range_gets": 64}},
+                    {"engine": "hf_hub"}
+                ]
+            },
+            "models": [
+                {
+                    "source": "huggingface",
+                    "repo": "Comfy-Org/MiniMax-H3",
+                    "files": ["diffusion_models/foo.safetensors"],
+                    "engine": "xet"
+                },
+                {
+                    "source": "huggingface",
+                    "repo": "private-org/gated-repo",
+                    "files": ["a.safetensors"],
+                    "engine": "hf_hub"
+                },
+                {
+                    "source": "civitai",
+                    "url": "https://civitai.com/api/download/models/12345",
+                    "path": "checkpoints/loras.safetensors"
+                },
+                {
+                    "source": "url",
+                    "url": "https://example.com/foo.safetensors",
+                    "path": "vae/foo.safetensors"
+                }
+            ],
+            "modules": [
+                {"url": "https://github.com/StanLukuvka/ComfyUI-MiniMax-H3-SPEED", "branch": "${SPEED_BRANCH:-main}"}
+            ],
+            "env": {
+                "HF_HUB_ENABLE_HF_TRANSFER": "0"
+            }
+        }
+    ]
+}
