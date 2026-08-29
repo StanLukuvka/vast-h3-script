@@ -34,12 +34,6 @@ fi
 # Vast base image may leave these unset; declare them so `set -u` doesn't abort.
 declare -a APT_PACKAGES=()
 declare -a PIP_PACKAGES=()
-declare -a CHECKPOINT_MODELS=()
-declare -a UNET_MODELS=()
-declare -a LORA_MODELS=()
-declare -a CONTROLNET_MODELS=()
-declare -a VAE_MODELS=()
-declare -a ESRGAN_MODELS=()
 declare -a NODES=()
 AUTO_UPDATE="${AUTO_UPDATE:-true}"
 
@@ -59,27 +53,12 @@ NODES=(
     "https://github.com/StanLukuvka/ComfyUI-MiniMax-H3-SPEED@${SPEED_BRANCH:-main}"
 )
 
-WORKFLOWS=(
 
-)
 
-CHECKPOINT_MODELS=(
-)
 
-UNET_MODELS=(
-)
 
-LORA_MODELS=(
-)
 
-VAE_MODELS=(
-)
 
-ESRGAN_MODELS=(
-)
-
-CONTROLNET_MODELS=(
-)
 
 ### DO NOT EDIT BELOW HERE UNLESS YOU KNOW WHAT YOU ARE DOING ###
 
@@ -202,9 +181,9 @@ for d in hf_cfg.get("downloads", []):
     if engine == "xet":
         if settings.get("high_performance"):
             print("export HF_XET_HIGH_PERFORMANCE=1")
-        n = settings.get("concurrent_range_gets")
-        if n is not None:
-            print(f"export HF_XET_NUM_CONCURRENT_RANGE_GETS={int(n)}")
+        n_concurrent = settings.get("concurrent_range_gets")
+        if n_concurrent is not None:
+            print(f"export HF_XET_NUM_CONCURRENT_RANGE_GETS={int(n_concurrent)}")
     elif engine == "hf_hub":
         # No special env; hf_hub_download uses sequential range gets (slow but resumable).
         pass
@@ -236,9 +215,9 @@ PYEOF
         printf "%s\n" "${py_out}" | sed 's/^/    /'
         eval "${py_out}"
     fi
-    local n_models
-    n_models=$(python3 -c "import json,pathlib; print(len(json.loads(pathlib.Path('/tmp/provisioning_config.json').read_text()).get('models',[])))" 2>/dev/null || echo 0)
-    printf "==> Config: %s model(s), %s module(s)\n" "${n_models}" "${#NODES[@]}"
+    local model_count
+    model_count=$(python3 -c "import json,pathlib; print(len(json.loads(pathlib.Path('/tmp/provisioning_config.json').read_text()).get('models',[])))" 2>/dev/null || echo 0)
+    printf "==> Config: %s model(s), %s module(s)\n" "${model_count}" "${#NODES[@]}"
 }
 
 # Provider-agnostic model fetcher driven by config.json models[].
@@ -255,23 +234,23 @@ provisioning_get_models() {
         return 1
     fi
 
-    local n_models
-    n_models=$(jq '.models | length' "${CONFIG_LOCAL}")
-    if [[ "${n_models}" -eq 0 ]]; then
+    local model_count
+    model_count=$(jq '.models | length' "${CONFIG_LOCAL}")
+    if [[ "${model_count}" -eq 0 ]]; then
         printf "==> No models in config — nothing to download\n"
         return 0
     fi
-    printf "==> Downloading %s model(s) from config\n" "${n_models}"
+    printf "==> Downloading %s model(s) from config\n" "${model_count}"
 
     # 1) HF xet: group all files per repo, one huggingface_download call per repo.
     #    engine="xet" routes here; engine="hf_hub" routes to section 2 below.
-    declare -A hf_xet_groups=()
+    declare -A xet_repo_groups=()
     while IFS=$'	' read -r repo file; do
         [[ -z "${repo}" || -z "${file}" ]] && continue
-        if [[ -z "${hf_xet_groups[${repo}]:-}" ]]; then
-            hf_xet_groups["${repo}"]="${file}"
+        if [[ -z "${xet_repo_groups[${repo}]:-}" ]]; then
+            xet_repo_groups["${repo}"]="${file}"
         else
-            hf_xet_groups["${repo}"]+=$'\n'"${file}"
+            xet_repo_groups["${repo}"]+=$'\n'"${file}"
         fi
     done < <(jq -r '
         .models[]
@@ -283,17 +262,17 @@ provisioning_get_models() {
     ' "${CONFIG_LOCAL}")
 
     local repo key files
-    local xet_failures=0
-    for repo in "${!hf_xet_groups[@]}"; do
-        mapfile -t files <<< "${hf_xet_groups[${repo}]}"
+    local xet_failure_count=0
+    for repo in "${!xet_repo_groups[@]}"; do
+        mapfile -t files <<< "${xet_repo_groups[${repo}]}"
         printf "==> HF[xet] %s (%d file(s)) -> %s\n" "${repo}" "${#files[@]}" "${COMFYUI_DIR}/models"
         if ! huggingface_download "${repo}" "${COMFYUI_DIR}/models" "${files[@]}"; then
             printf "!! HF[xet] %s failed\n" "${repo}" >&2
-            xet_failures=$((xet_failures+1))
+            xet_failure_count=$((xet_failure_count+1))
         fi
     done
-    if [[ "${xet_failures}" -gt 0 ]]; then
-        printf "!! HF[xet]: %d repo(s) failed — aborting\n" "${xet_failures}" >&2
+    if [[ "${xet_failure_count}" -gt 0 ]]; then
+        printf "!! HF[xet]: %d repo(s) failed — aborting\n" "${xet_failure_count}" >&2
         return 1
     fi
 
@@ -327,7 +306,7 @@ provisioning_get_models() {
         # mirror token to both env names so hf CLI picks it up regardless of which was set
         [[ -n "${HF_TOKEN:-}" ]] && export HUGGING_FACE_HUB_TOKEN="${HF_TOKEN}"
         [[ -n "${HUGGING_FACE_HUB_TOKEN:-}" ]] && export HF_TOKEN="${HUGGING_FACE_HUB_TOKEN}"
-        local hf_hub_failures=0
+        local hf_hub_failure_count=0
         for repo in "${!hf_hub_groups[@]}"; do
             mapfile -t files <<< "${hf_hub_groups[${repo}]}"
             printf "==> HF[hf_hub] %s (%d file(s)) — sequential, resumable\n" "${repo}" "${#files[@]}"
@@ -345,12 +324,12 @@ provisioning_get_models() {
                     printf "      OK %s\n" "${f}"
                 else
                     printf "      FAIL %s\n" "${f}" >&2
-                    hf_hub_failures=$((hf_hub_failures+1))
+                    hf_hub_failure_count=$((hf_hub_failure_count+1))
                 fi
             done
         done
-        if [[ "${hf_hub_failures}" -gt 0 ]]; then
-            printf "!! HF[hf_hub]: %d file(s) failed — aborting\n" "${hf_hub_failures}" >&2
+        if [[ "${hf_hub_failure_count}" -gt 0 ]]; then
+            printf "!! HF[hf_hub]: %d file(s) failed — aborting\n" "${hf_hub_failure_count}" >&2
             return 1
         fi
     fi
@@ -456,8 +435,8 @@ provisioning_validate_tokens() {
     # Hugging Face — only validate if a token is present AND any H3 file will need it
     # Private/gated models will 401 without it; public ones are fine without.
     if [[ -n "${HF_TOKEN:-}" || -n "${HUGGING_FACE_HUB_TOKEN:-}" ]]; then
-        local tok="${HF_TOKEN:-${HUGGING_FACE_HUB_TOKEN:-}}"
-        printf "    HF_TOKEN set (%s...) — validating... " "${tok:0:6}"
+        local hf_token_val="${HF_TOKEN:-${HUGGING_FACE_HUB_TOKEN:-}}"
+        printf "    HF_TOKEN set (%s...) — validating... " "${hf_token_val:0:6}"
         if provisioning_has_valid_hf_token; then
             printf "OK (200)\n"
         else
@@ -495,8 +474,8 @@ provisioning_verify_h3_weights() {
     fi
 
     # Emit one TSV row per file to verify: source<TAB>relpath<TAB>expect (or empty)
-    local verify_tmp
-    verify_tmp="$(mktemp)"
+    local verify_tsv
+    verify_tsv="$(mktemp)"
     if ! jq -r '
         .models[]?
         | if .source == "huggingface" then
@@ -507,16 +486,16 @@ provisioning_verify_h3_weights() {
           else empty
           end
         | @tsv
-    ' "${CONFIG_LOCAL}" > "${verify_tmp}"; then
+    ' "${CONFIG_LOCAL}" > "${verify_tsv}"; then
         printf "!! Verify: jq failed to parse %s\n" "${CONFIG_LOCAL}" >&2
-        rm -f "${verify_tmp}"
+        rm -f "${verify_tsv}"
         return 1
     fi
 
     local src rel expect expect_file actual
-    local line_n=0
+    local line_no=0
     while IFS=$'\t' read -r src rel expect; do
-        line_n=$((line_n+1))
+        line_no=$((line_no+1))
         [[ -z "${rel}" ]] && continue
         local path="${base}/${rel}"
         local name
@@ -553,17 +532,17 @@ provisioning_verify_h3_weights() {
             printf "    OK    %-60s %s (expected %s)\n" "${rel}" "${actual}" "${expect}"
         else
             # No expected — for HF engines, just ensure >100M; for civitai/url, >1M.
-            local min_size=1048576
-            [[ "${src}" == "huggingface" ]] && min_size=104857600
-            if [[ "${actual}" -lt "${min_size}" ]]; then
-                printf "    FAIL  %-60s too small: %s (min %s)\n" "${rel}" "${actual}" "${min_size}" >&2
+            local min_size_bytes=1048576
+            [[ "${src}" == "huggingface" ]] && min_size_bytes=104857600
+            if [[ "${actual}" -lt "${min_size_bytes}" ]]; then
+                printf "    FAIL  %-60s too small: %s (min %s)\n" "${rel}" "${actual}" "${min_size_bytes}" >&2
                 failures=$((failures+1))
             else
-                printf "    OK    %-60s %s (no expected, >%s)\n" "${rel}" "${actual}" "${min_size}"
+                printf "    OK    %-60s %s (no expected, >%s)\n" "${rel}" "${actual}" "${min_size_bytes}"
             fi
         fi
-    done < "${verify_tmp}"
-    rm -f "${verify_tmp}"
+    done < "${verify_tsv}"
+    rm -f "${verify_tsv}"
 
     if [[ "${failures}" -gt 0 ]]; then
         printf "!! Verify: %s file(s) failed — will trigger re-download or abort\n" "${failures}" >&2
@@ -587,31 +566,13 @@ function provisioning_start() {
     provisioning_get_pip_packages
     printf "==> Downloading models from config\n"
     provisioning_get_models
-    local models_rc=$?
-    printf "==> Model download phase finished (rc=%s)\n" "${models_rc}"
-    if [[ ${models_rc} -ne 0 ]]; then
-        printf "!! Model download failed (rc=%s) — not verifying\n" "${models_rc}" >&2
+    local download_rc=$?
+    printf "==> Model download phase finished (rc=%s)\n" "${download_rc}"
+    if [[ ${download_rc} -ne 0 ]]; then
+        printf "!! Model download failed (rc=%s) — not verifying\n" "${download_rc}" >&2
         exit 1
     fi
     provisioning_verify_h3_weights || exit 1
-    provisioning_get_files \
-        "${COMFYUI_DIR}/models/checkpoints" \
-        "${CHECKPOINT_MODELS[@]}"
-    provisioning_get_files \
-        "${COMFYUI_DIR}/models/unet" \
-        "${UNET_MODELS[@]}"
-    provisioning_get_files \
-        "${COMFYUI_DIR}/models/lora" \
-        "${LORA_MODELS[@]}"
-    provisioning_get_files \
-        "${COMFYUI_DIR}/models/controlnet" \
-        "${CONTROLNET_MODELS[@]}"
-    provisioning_get_files \
-        "${COMFYUI_DIR}/models/vae" \
-        "${VAE_MODELS[@]}"
-    provisioning_get_files \
-        "${COMFYUI_DIR}/models/esrgan" \
-        "${ESRGAN_MODELS[@]}"
     provisioning_print_end
 }
 
@@ -663,21 +624,6 @@ function provisioning_get_nodes() {
     done
 }
 
-function provisioning_get_files() {
-    if [[ -z $2 ]]; then return 1; fi
-    
-    dir="$1"
-    mkdir -p "$dir"
-    shift
-    arr=("$@")
-    printf "Downloading %s model(s) to %s...\n" "${#arr[@]}" "$dir"
-    for url in "${arr[@]}"; do
-        printf "Downloading: %s\n" "${url}"
-        provisioning_download "${url}" "${dir}"
-        printf "\n"
-    done
-}
-
 function provisioning_print_header() {
     printf "\n##############################################\n#                                            #\n#          Provisioning container            #\n#                                            #\n#         This will take some time           #\n#                                            #\n# Your container will be ready on completion #\n#                                            #\n##############################################\n\n"
 }
@@ -688,19 +634,13 @@ function provisioning_print_end() {
 
 function provisioning_has_valid_hf_token() {
     [[ -n "${HF_TOKEN:-}${HUGGING_FACE_HUB_TOKEN:-}" ]] || return 1
-    url="https://huggingface.co/api/whoami-v2"
-    local tok="${HF_TOKEN:-${HUGGING_FACE_HUB_TOKEN:-}}"
-
-    response=$(curl -o /dev/null -s -w "%{http_code}" -X GET "$url" \
-        -H "Authorization: Bearer ${tok}" \
+    local hf_token_val="${HF_TOKEN:-${HUGGING_FACE_HUB_TOKEN:-}}"
+    local api_url="https://huggingface.co/api/whoami-v2"
+    local response
+    response=$(curl -o /dev/null -s -w "%{http_code}" -X GET "${api_url}" \
+        -H "Authorization: Bearer ${hf_token_val}" \
         -H "Content-Type: application/json")
-
-    # Check if the token is valid
-    if [ "$response" -eq 200 ]; then
-        return 0
-    else
-        return 1
-    fi
+    [[ "${response}" -eq 200 ]]
 }
 
 function provisioning_has_valid_civitai_token() {
@@ -810,10 +750,10 @@ vast_h3_status() {
     fi
     printf "    models expected  :\n"
     if [[ -f "${CONFIG_LOCAL:-/tmp/provisioning_config.json}" ]]; then
-        local _comfyui_dir="${COMFYUI_DIR:-/ComfyUI}"
+        local comfyui_dir_local="${COMFYUI_DIR:-/ComfyUI}"
         # Pass both CONFIG_LOCAL and HF_Xet expect cache dir so the python
         # can also check the per-file expected size when available.
-        COMFYUI_DIR="${_comfyui_dir}" \
+        COMFYUI_DIR="${comfyui_dir_local}" \
         HF_XET_EXPECT_DIR="/tmp" \
         python3 << 'PYEOF'
 import json, os, pathlib, glob
@@ -840,21 +780,21 @@ for m in c.get("models", []):
             p = base / f
             name = pathlib.Path(f).name
             if not (p.exists() and p.stat().st_size > 0):
-                mark = "MISS"
+                status_mark = "MISS"
             else:
                 exp = expected_size(name)
                 if exp and p.stat().st_size < exp * 0.99:
-                    mark = "SHORT"
+                    status_mark = "SHORT"
                 else:
-                    mark = "OK  "
-            print(f"      [{mark}] {f}")
+                    status_mark = "OK  "
+            print(f"      [{status_mark}] {f}")
     else:
         p = base / m.get("path","")
         if not (p.exists() and p.stat().st_size > 0):
-            mark = "MISS"
+            status_mark = "MISS"
         else:
-            mark = "OK  "
-        print(f"      [{mark}] [{m.get('source')}] {m.get('path')}")
+            status_mark = "OK  "
+        print(f"      [{status_mark}] [{m.get('source')}] {m.get('path')}")
 PYEOF
     else
         printf "      (no config)\n"
@@ -1011,10 +951,10 @@ done
 
 # Restart ComfyUI — try each mechanism; first success wins.
 printf "==> Restarting ComfyUI\n"
-restarted=0
+restart_done=0
 
 # a) s6-overlay (vastai/comfy base image)
-if [[ -d /run/service && ${restarted} -eq 0 ]]; then
+if [[ -d /run/service && ${restart_done} -eq 0 ]]; then
     for svc in /run/service/*/; do
         [[ -d "${svc}" ]] || continue
         name=$(basename "${svc}")
@@ -1026,7 +966,7 @@ if [[ -d /run/service && ${restarted} -eq 0 ]]; then
             if pgrep -af "s6-supervise ${name}" >/dev/null 2>&1; then
                 if s6-svc -r "/run/service/${name}" 2>/dev/null; then
                     printf "    s6-svc -r /run/service/%s (OK)\n" "${name}"
-                    restarted=1
+                    restart_done=1
                     break
                 fi
             fi
@@ -1035,12 +975,12 @@ if [[ -d /run/service && ${restarted} -eq 0 ]]; then
 fi
 
 # b) supervisord
-if [[ ${restarted} -eq 0 ]] && command -v supervisorctl >/dev/null 2>&1; then
+if [[ ${restart_done} -eq 0 ]] && command -v supervisorctl >/dev/null 2>&1; then
     for prog in comfyui comfy ComfyUI; do
         if supervisorctl status "${prog}" >/dev/null 2>&1; then
             if supervisorctl restart "${prog}" 2>&1 | sed 's/^/      /'; then
                 printf "    supervisorctl restart %s (OK)\n" "${prog}"
-                restarted=1
+                restart_done=1
                 break
             fi
         fi
@@ -1048,16 +988,16 @@ if [[ ${restarted} -eq 0 ]] && command -v supervisorctl >/dev/null 2>&1; then
 fi
 
 # c) Fallback: SIGTERM the comfyui python process; its supervisor (whatever it is) restarts it.
-if [[ ${restarted} -eq 0 ]]; then
+if [[ ${restart_done} -eq 0 ]]; then
     comfy_pid=$(pgrep -f "python.*(main|server)\.py.*(--listen|--port)" 2>/dev/null | head -1 || true)
     if [[ -n "${comfy_pid}" ]]; then
         printf "    kill -TERM %s (no supervisor found)\n" "${comfy_pid}"
         kill -TERM "${comfy_pid}" 2>/dev/null || true
-        restarted=1
+        restart_done=1
     fi
 fi
 
-if [[ ${restarted} -eq 0 ]]; then
+if [[ ${restart_done} -eq 0 ]]; then
     printf "!! Could not find a way to restart ComfyUI. Restart it manually.\n" >&2
     printf "   (tried: s6-svc, supervisorctl, pgrep kill — none matched)\n" >&2
 fi
