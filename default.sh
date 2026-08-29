@@ -88,10 +88,11 @@ CONTROLNET_MODELS=(
 # hardcoded model lists below this point.
 # Two-stage flow:
 #   PROVISIONING_SCRIPT = default.sh (this file)
-#   PROVISIONING_CONFIG = config.json (URL or local file)
+#   PROVISIONING_CONFIG = config.json (URL, file path, or inline JSON starting with '{')
+# Either PROVISIONING_CONFIG or CONFIG_URL must be set. There is no fallback —
+# if you don't set it, provisioning fails fast.
 # ---------------------------------------------------------------------------
 PROVISIONING_CONFIG_URL="${PROVISIONING_CONFIG:-${CONFIG_URL:-}}"
-DEFAULT_CONFIG_URL="https://raw.githubusercontent.com/StanLukuvka/vast-h3-script/main/config.json"
 CONFIG_LOCAL="/tmp/provisioning_config.json"
 
 # Load the standalone Xet downloader (hf_xet_download <repo> <dir> <files...>).
@@ -126,57 +127,46 @@ fi
 
 # ---------------------------------------------------------------------------
 # Config loader — fetches PROVISIONING_CONFIG_URL into $CONFIG_LOCAL.
-# Falls back: inline JSON, sibling config.json, then DEFAULT_CONFIG_URL.
+# PROVISIONING_CONFIG must be set. Accepts:
+#   - URL            (https?://...)      — fetched via curl
+#   - Local file     (/path/to/file)     — copied
+#   - Inline JSON    (starts with '{')   — written directly
+# No sibling-config fallback, no default URL — fail fast if unset or fetch fails.
 # ---------------------------------------------------------------------------
 provisioning_load_config() {
     local url="${PROVISIONING_CONFIG_URL:-}"
-    # Inline JSON?
+    if [[ -z "${url}" ]]; then
+        printf "!! PROVISIONING_CONFIG is not set. Set it to a URL, file path, or inline JSON before running.\n" >&2
+        return 1
+    fi
+    # Inline JSON
     if [[ "${url}" == "{"* ]]; then
         printf "%s" "${url}" > "${CONFIG_LOCAL}"
         printf "==> PROVISIONING_CONFIG is inline JSON (%s bytes)\n" "$(wc -c < "${CONFIG_LOCAL}")"
         return 0
     fi
-    # URL or local file
-    if [[ -n "${url}" ]]; then
-        if [[ "${url}" =~ ^https?:// ]]; then
-            printf "==> Fetching config from %s\n" "${url}"
-            if ! curl -fsSL "${url}" -o "${CONFIG_LOCAL}" 2>/tmp/cfg_curl_err.log; then
-                printf "!! WARN: fetch failed — trying fallback\n" >&2
-                cat /tmp/cfg_curl_err.log 2>/dev/null | head -5 >&2 || true
-                url=""
-            elif [[ ! -s "${CONFIG_LOCAL}" ]]; then
-                printf "!! WARN: fetched config empty — trying fallback\n" >&2
-                url=""
-            else
-                printf "==> Config fetched OK (%s bytes)\n" "$(wc -c < "${CONFIG_LOCAL}")"
-                return 0
-            fi
-        elif [[ -f "${url}" ]]; then
-            cp "${url}" "${CONFIG_LOCAL}"
-            printf "==> Using local config %s\n" "${url}"
-            return 0
-        else
-            printf "!! WARN: PROVISIONING_CONFIG=%s is not URL or file\n" "${url}" >&2
-            url=""
+    # URL
+    if [[ "${url}" =~ ^https?:// ]]; then
+        printf "==> Fetching config from %s\n" "${url}"
+        if ! curl -fsSL "${url}" -o "${CONFIG_LOCAL}" 2>/tmp/cfg_curl_err.log; then
+            printf "!! Failed to fetch config from %s\n" "${url}" >&2
+            cat /tmp/cfg_curl_err.log 2>/dev/null | head -5 >&2 || true
+            return 1
         fi
-    fi
-    # Sibling config.json
-    local cand
-    for cand in "$(dirname "${VAST_H3_SCRIPT}")/config.json" "./config.json" "/workspace/vast-h3-script/config.json"; do
-        if [[ -f "${cand}" ]]; then
-            cp "${cand}" "${CONFIG_LOCAL}"
-            printf "==> Using sibling config %s\n" "${cand}"
-            return 0
+        if [[ ! -s "${CONFIG_LOCAL}" ]]; then
+            printf "!! Fetched config from %s is empty\n" "${url}" >&2
+            return 1
         fi
-    done
-    # Final fallback: DEFAULT_CONFIG_URL
-    printf "==> Fetching default config from %s\n" "${DEFAULT_CONFIG_URL}"
-    if curl -fsSL "${DEFAULT_CONFIG_URL}" -o "${CONFIG_LOCAL}" 2>/tmp/cfg_curl_err.log \
-        && [[ -s "${CONFIG_LOCAL}" ]]; then
-        printf "==> Default config fetched OK (%s bytes)\n" "$(wc -c < "${CONFIG_LOCAL}")"
+        printf "==> Config fetched OK (%s bytes)\n" "$(wc -c < "${CONFIG_LOCAL}")"
         return 0
     fi
-    printf "!! WARN: no config available\n" >&2
+    # Local file
+    if [[ -f "${url}" ]]; then
+        cp "${url}" "${CONFIG_LOCAL}"
+        printf "==> Using local config %s (%s bytes)\n" "${url}" "$(wc -c < "${CONFIG_LOCAL}")"
+        return 0
+    fi
+    printf "!! PROVISIONING_CONFIG=%s is not a URL, file path, or inline JSON\n" "${url}" >&2
     return 1
 }
 
@@ -249,14 +239,12 @@ PYEOF
 #   source=civitai|url: { url, path }                no engine (aria2/wget pick)
 provisioning_get_models() {
     if [[ ! -f "${CONFIG_LOCAL}" ]]; then
-        printf "!! provisioning_get_models: no config — fallback to hardcoded H3\n" >&2
-        provisioning_get_h3_weights
-        return $?
+        printf "!! provisioning_get_models: no config at %s — did provisioning_load_config fail?\n" "${CONFIG_LOCAL}" >&2
+        return 1
     fi
     if ! jq -e . "${CONFIG_LOCAL}" >/dev/null 2>&1; then
-        printf "!! provisioning_get_models: invalid JSON — fallback\n" >&2
-        provisioning_get_h3_weights
-        return $?
+        printf "!! provisioning_get_models: %s is not valid JSON\n" "${CONFIG_LOCAL}" >&2
+        return 1
     fi
 
     local n_models
@@ -649,19 +637,6 @@ function provisioning_get_nodes() {
             fi
         fi
     done
-}
-
-# Pull the MiniMax H3 weights using the standalone Xet downloader.
-function provisioning_get_h3_weights() {
-    # Lean t2v+i2v stack (~38GB) + turbo LoRAs.
-    hf_xet_download "Comfy-Org/MiniMax-H3" "${COMFYUI_DIR}/models" \
-        "diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors" \
-        "text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors" \
-        "vae/minimax_h3_video_vae_fp16.safetensors" \
-        "vae/minimax_h3_audio_vae_fp32.safetensors" \
-        "loras/minimax_h3_fl2v_turbo_4step_v1.0_768p_comfyui_bf16.safetensors" \
-        "loras/minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors" \
-        "loras/minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors"
 }
 
 function provisioning_get_files() {
