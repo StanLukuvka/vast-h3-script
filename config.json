@@ -1,0 +1,48 @@
+{
+    "schema_version": 2,
+    "comfyui": {
+        "image": "vastai/comfy:v0.32.0-cuda-12.9-py312",
+        "dir": "/ComfyUI",
+        "port": 18188,
+        "launch_args": "--disable-auto-launch --port 18188 --enable-cors-header --lowvram"
+    },
+    "huggingface": {
+        "downloads": [
+            {
+                "engine": "xet",
+                "settings": {
+                    "high_performance": true,
+                    "concurrent_range_gets": 64
+                }
+            },
+            {
+                "engine": "hf_hub"
+            }
+        ]
+    },
+    "models": [
+        {
+            "source": "huggingface",
+            "repo": "Comfy-Org/MiniMax-H3",
+            "files": [
+                "diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+                "text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+                "vae/minimax_h3_video_vae_fp16.safetensors",
+                "vae/minimax_h3_audio_vae_fp32.safetensors",
+                "loras/minimax_h3_fl2v_turbo_4step_v1.0_768p_comfyui_bf16.safetensors",
+                "loras/minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors",
+                "loras/minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors"
+            ],
+            "engine": "xet"
+        }
+    ],
+    "modules": [
+        {
+            "url": "https://github.com/StanLukuvka/ComfyUI-MiniMax-H3-SPEED",
+            "branch": "${SPEED_BRANCH:-main}"
+        }
+    ],
+    "env": {
+        "HF_HUB_ENABLE_HF_TRANSFER": "0"
+    }
+}
