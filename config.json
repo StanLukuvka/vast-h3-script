@@ -1,12 +1,6 @@
 {
     "$schema": "./config.schema.json",
     "schema_version": 2,
-    "comfyui": {
-        "image": "vastai/comfy:v0.32.0-cuda-12.9-py312",
-        "dir": "/ComfyUI",
-        "port": 18188,
-        "launch_args": "--disable-auto-launch --port 18188 --enable-cors-header --lowvram"
-    },
     "huggingface": {
         "downloads": [
             {

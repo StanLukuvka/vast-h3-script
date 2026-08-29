@@ -16,29 +16,6 @@
             "type": "integer",
             "const": 2
         },
-        "comfyui": {
-            "description": "Optional metadata describing the ComfyUI base image and how it should be launched. Documentation only — the launch flags and dir are read from environment variables at runtime (COMFYUI_DIR, COMFYUI_ARGS), not from this block.",
-            "type": "object",
-            "additionalProperties": false,
-            "properties": {
-                "image": {
-                    "description": "Vast base image tag. Reference only; not pulled by default.sh.",
-                    "type": "string"
-                },
-                "dir": {
-                    "description": "Where ComfyUI is installed. Set COMFYUI_DIR env var to override (default: /workspace/ComfyUI).",
-                    "type": "string"
-                },
-                "port": {
-                    "description": "Port the ComfyUI web UI listens on. Reference only.",
-                    "type": "integer"
-                },
-                "launch_args": {
-                    "description": "COMFYUI_ARGS passed to the base-image supervisor. Must include --lowvram for VRAM < 32GB (preflight forces this automatically).",
-                    "type": "string"
-                }
-            }
-        },
         "huggingface": {
             "description": "Per-engine download settings for Hugging Face models. Each entry sets env vars for one HF download engine. Models reference an engine by name (see models[].engine).",
             "type": "object",
