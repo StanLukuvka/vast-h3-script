@@ -72,45 +72,40 @@ NODES=(
 # if you don't set it, provisioning fails fast.
 # ---------------------------------------------------------------------------
 PROVISIONING_CONFIG_URL="${PROVISIONING_CONFIG:-${CONFIG_URL:-}}"
-CONFIG_LOCAL="/tmp/provisioning_config.json"
+CONFIG_LOCAL="${CONFIG_LOCAL:-/tmp/provisioning_config.json}"
 
-# Load the standalone Xet downloader (hf_xet_download <repo> <dir> <files...>).
-# NOTE: the Vast provisioner writes PROVISIONING_SCRIPT to a fixed path
-# (/provisioning.sh) and runs it directly, so BASH_SOURCE sibling resolution
-# is unreliable. Instead we fetch the helper from the same raw URL the
-# provisioner used for this script. Override via HF_XET_SCRIPT_URL if needed.
+# --- Providers (per-source downloaders) -----------------------------------
+# Each provider file in providers/ defines its own download function:
+#   providers/huggingface.sh  → huggingface_download  (uses hf_xet_download)
+#   providers/civitai.sh      → civitai_download
+#   providers/url.sh          → url_download
+# Source them relative to this script so the layout works no matter where
+# default.sh lives (Vast may write it to /provisioning.sh or /workspace/).
+PROVIDERS_DIR="${VAST_H3_PROVIDERS_DIR:-$(cd "$(dirname "${VAST_H3_SCRIPT}")" && pwd)/providers}"
+if [[ ! -d "${PROVIDERS_DIR}" ]]; then
+    printf "!! ERROR: providers dir not found: %s\n" "${PROVIDERS_DIR}" >&2
+    printf "   Set VAST_H3_PROVIDERS_DIR or place providers/ next to default.sh\n" >&2
+    exit 1
+fi
+provider_files_sourced=0
+for provider_file in "${PROVIDERS_DIR}"/*.sh; do
+    [[ -f "${provider_file}" ]] || continue
+    # shellcheck source=/dev/null
+    source "${provider_file}"
+    provider_files_sourced=$((provider_files_sourced+1))
+done
+if [[ "${provider_files_sourced}" -eq 0 ]]; then
+    printf "!! ERROR: no provider files found in %s\n" "${PROVIDERS_DIR}" >&2
+    exit 1
+fi
+unset provider_file provider_files_sourced
+
+# Xet engine URL — same place as before, just declared up here so the
+# huggingface provider can use it.
 HF_XET_SCRIPT_URL="${HF_XET_SCRIPT_URL:-https://raw.githubusercontent.com/StanLukuvka/vast-h3-script/main/hf_xet_download.sh}"
 HF_XET_SCRIPT_LOCAL="/tmp/hf_xet_download.sh"
-
-printf "==> Loading hf_xet_download.sh from %s\n" "${HF_XET_SCRIPT_URL}"
-curl -fsSL "${HF_XET_SCRIPT_URL}" -o "${HF_XET_SCRIPT_LOCAL}" 2>/tmp/curl_err.log
-CURL_RC=$?
-if [[ ${CURL_RC} -ne 0 ]]; then
-    printf "!! ERROR: failed to fetch hf_xet_download.sh (curl rc=%s)\n" "${CURL_RC}" >&2
-    printf "   %s\n" "$(cat /tmp/curl_err.log 2>/dev/null)" >&2
-    exit 1
-elif [[ ! -s "${HF_XET_SCRIPT_LOCAL}" ]]; then
-    printf "!! ERROR: fetched hf_xet_download.sh but it is empty\n" >&2
-    exit 1
-else
-    # shellcheck source=/dev/null
-    source "${HF_XET_SCRIPT_LOCAL}"
-    if [[ "$(type -t hf_xet_download)" != "function" ]]; then
-        printf "!! ERROR: hf_xet_download.sh sourced but hf_xet_download() not defined\n" >&2
-        printf "   First 5 lines of fetched file:\n" >&2
-        head -5 "${HF_XET_SCRIPT_LOCAL}" >&2
-        exit 1
-    fi
-    printf "==> hf_xet_download() loaded OK (%s bytes)\n" "$(wc -c < "${HF_XET_SCRIPT_LOCAL}")"
-fi
-
-# Wrapper: rename the lower-level xet implementation to a higher-level
-# "download from HF" entry point. Engine choice (xet vs hf_hub) is made by
-# the dispatcher in provisioning_get_models based on config.json:models[].engine;
-# by the time we get here, the engine has already been decided.
-huggingface_download() {
-    hf_xet_download "$@"
-}
+# Trigger the xet fetch + load (provider function, no-op if already loaded).
+huggingface_load_xet_engine || exit 1
 
 # ---------------------------------------------------------------------------
 # Config loader — fetches PROVISIONING_CONFIG_URL into $CONFIG_LOCAL.
@@ -334,45 +329,19 @@ provisioning_get_models() {
         fi
     fi
 
-    # 3) Non-HF: civitai / url. No engine choice; aria2c if present, else wget -c.
+    # 3) Non-HF: civitai / url — delegated to providers/civitai.sh and
+    #    providers/url.sh. Each defines a download function with the same
+    #    signature: <fn>_download <url> <dest_dir> <dest_filename> [token]
+    local non_hf_failure_count=0
     while IFS=$'	' read -r src url path; do
         [[ -z "${src}" || -z "${url}" || -z "${path}" ]] && continue
-        local dest_dir="${COMFYUI_DIR}/models/$(dirname "${path}")"
-        local dest_file="${COMFYUI_DIR}/models/${path}"
-        mkdir -p "${dest_dir}"
-        if [[ -f "${dest_file}" && -s "${dest_file}" ]]; then
-            printf "==> SKIP (already exists): %s\n" "${path}"
-            continue
-        fi
         printf "==> GET [%s] %s -> %s\n" "${src}" "${url}" "${path}"
-        local auth_token=""
-        [[ "${src}" == "civitai" ]] && auth_token="${CIVITAI_TOKEN:-}"
-        if ! command -v aria2c >/dev/null 2>&1; then
-            printf "!! aria2c not installed — refusing to download %s (set engine to 'xet'/'hf_hub' or install aria2)\n" "${url}" >&2
-            return 1
-        fi
-        local aria_args=(-x16 -s16 -k8M --continue=true --file-allocation=none \
-                         --auto-file-renaming=false --allow-overwrite=false \
-                         --retry-wait=3 --console-log-level=warn \
-                         --dir="${dest_dir}" --out="$(basename "${path}")")
-        [[ -n "${auth_token}" ]] && aria_args+=(--header="Authorization: Bearer ${auth_token}")
-        if ! aria2c "${aria_args[@]}" "${url}"; then
-            printf "!! [%s] %s failed\n" "${src}" "${url}" >&2
-            return 1
-        fi
-        if [[ ! -f "${dest_file}" ]]; then
-            # aria2c --out=foo should land at exactly ${dest_file}, but if --out was
-            # ignored (e.g. server-suggested name) we need a rename, not a retry.
-            local newest
-            newest=$(ls -t "${dest_dir}" 2>/dev/null | head -1)
-            if [[ -n "${newest}" && -f "${dest_dir}/${newest}" && "${newest}" != "$(basename "${path}")" ]]; then
-                mv "${dest_dir}/${newest}" "${dest_file}" 2>/dev/null || \
-                    cp "${dest_dir}/${newest}" "${dest_file}" 2>/dev/null || true
-            fi
-            if [[ ! -f "${dest_file}" ]]; then
-                printf "!! [%s] file did not end up at %s\n" "${src}" "${dest_file}" >&2
-                return 1
-            fi
+        local dest_dir="${COMFYUI_DIR}/models/$(dirname "${path}")"
+        local dest_filename
+        dest_filename="$(basename "${path}")"
+        if ! "${src}_download" "${url}" "${dest_dir}" "${dest_filename}" "${CIVITAI_TOKEN:-}"; then
+            printf "!! %s download failed: %s\n" "${src}" "${url}" >&2
+            non_hf_failure_count=$((non_hf_failure_count+1))
         fi
     done < <(jq -r '
         .models[]
@@ -380,6 +349,10 @@ provisioning_get_models() {
         | select(.url and .path)
         | [.source, .url, .path] | @tsv
     ' "${CONFIG_LOCAL}")
+    if [[ "${non_hf_failure_count}" -gt 0 ]]; then
+        printf "!! Non-HF: %d url(s) failed — aborting\n" "${non_hf_failure_count}" >&2
+        return 1
+    fi
 }
 
 
@@ -501,7 +474,13 @@ provisioning_verify_h3_weights() {
         local name
         name=$(basename "${rel}")
         # Look for an expect-size tag. Prefer the exact one; fall back to glob.
-        expect_file=$(ls /tmp/hf_xet_expect.*."${name}" 2>/dev/null | head -1)
+        # Use a fixed glob + null-safe handling: `ls` exits 2 when the glob has
+        # no matches, which would trip `set -e` inside the command substitution
+        # (pipefail propagates it). Use `compgen -G` or a here-string trick.
+        shopt -s nullglob
+        expect_file=( /tmp/hf_xet_expect.*."${name}" )
+        shopt -u nullglob
+        expect_file="${expect_file[0]:-}"
         if [[ -z "${expect_file}" ]]; then
             expect_file=$(find /tmp -maxdepth 2 -name "hf_xet_expect.*.${name}" -type f 2>/dev/null | head -1)
         fi
@@ -695,6 +674,7 @@ function provisioning_download() {
 vast_h3_install_loader() {
     local loader="/usr/local/bin/vast-h3"
     local funcs_src="/tmp/vast-h3-functions.sh"
+    local providers_dir="/tmp/vast-h3-providers"
     # Extract everything in this file UP TO (but not including) the
     # "Allow user to disable provisioning" block at the bottom. That's the
     # function definitions plus the helpers.
@@ -702,6 +682,15 @@ vast_h3_install_loader() {
         /^# Allow user to disable provisioning if they started/ { exit }
         { print }
     ' "${VAST_H3_SCRIPT}" > "${funcs_src}"
+    # Copy the providers/ dir next to the funcs file so the source loop in
+    # the extracted funcs can find it (PROVIDERS_DIR defaults to
+    # "$(dirname ${VAST_H3_SCRIPT})/providers" — the funcs file lives in /tmp
+    # but the real providers/ is wherever default.sh is). By copying to
+    # /tmp/vast-h3-providers/ and exporting VAST_H3_PROVIDERS_DIR, the loader
+    # and any subsequent `source` of the funcs file gets the right path.
+    mkdir -p "${providers_dir}"
+    cp -a "$(dirname "${VAST_H3_SCRIPT}")/providers/." "${providers_dir}/" 2>/dev/null || true
+    export VAST_H3_PROVIDERS_DIR="${providers_dir}"
     cat > "${loader}" << 'VAST_H3_EOF'
 #!/bin/bash
 # vast-h3 — runtime reloader; auto-generated by default.sh. Do not edit.
@@ -724,6 +713,8 @@ fi
 # Mark this file as sourced so its own auto-execution of provisioning
 # (and the vast_h3_install_loader call) is skipped.
 export VAST_H3_SOURCED=1
+# Point the provider loader at the bundled providers/ dir.
+export VAST_H3_PROVIDERS_DIR="/tmp/vast-h3-providers"
 
 # shellcheck disable=SC1090
 source "${VastH3_Funcs}"
