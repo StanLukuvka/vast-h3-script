@@ -254,12 +254,27 @@ for k, v in cfg.get("env", {}).items():
         print(f"export {k}={shlex.quote(str(v))}")
 
 # modules -> NODES (overrides hardcoded NODES if present)
+# branch values may use shell-style ${VAR:-default} defaults; expand them
+# now (os.environ) so we end up with the literal branch name, not the
+# unresolved ${...} string. shlex.quote below would otherwise single-quote
+# the value, preventing bash from expanding it at eval time.
+import os
+def _expand_defaults(value: str) -> str:
+    # Match ${VAR} or ${VAR:-default}. VAR is shell-var-like: [A-Za-z_][A-Za-z0-9_]*
+    import re as _re
+    def repl(m):
+        var = m.group(1)
+        default = m.group(3)  # may be None
+        val = os.environ.get(var, default if default is not None else "")
+        return val
+    return _re.sub(r'\$\{([A-Za-z_][A-Za-z0-9_]*)(:-([^}]*))?\}', repl, value)
+
 mods = cfg.get("modules", [])
 if mods:
     nodes = []
     for m in mods:
-        url = m.get("url", "")
-        branch = m.get("branch", "")
+        url = _expand_defaults(m.get("url", ""))
+        branch = _expand_defaults(m.get("branch", ""))
         if branch:
             nodes.append(f"{url}@{branch}")
         else:
