@@ -446,8 +446,9 @@ provisioning_check_disk() {
     local avail_gb
     avail_gb=$(df --output=avail -BG "${target}" 2>/dev/null | tail -1 | tr -dc '0-9')
     if [[ -z "${avail_gb}" ]]; then
-        printf "!! WARN: could not determine free space — continuing\n" >&2
-        return 0
+        printf "!! ERROR: could not determine free space at %s — refusing to provision\n" "${target}" >&2
+        printf "   (df returned empty; filesystem may be unsupported)\n" >&2
+        return 1
     fi
     printf "    Free: %sGB\n" "${avail_gb}"
     if [[ "${avail_gb}" -lt "${need_gb}" ]]; then
@@ -460,8 +461,9 @@ provisioning_check_disk() {
 provisioning_check_gpu() {
     printf "==> Preflight: GPU/VRAM check\n"
     if ! command -v nvidia-smi >/dev/null 2>&1; then
-        printf "!! WARN: nvidia-smi not found — cannot check VRAM\n" >&2
-        return 0
+        printf "!! ERROR: nvidia-smi not found — cannot check VRAM, refusing to provision\n" >&2
+        printf "   (Vast GPU images always ship nvidia-smi; if it's missing something is broken)\n" >&2
+        return 1
     fi
     nvidia-smi --query-gpu=name,total_memory --format=csv,noheader 2>/dev/null | sed 's/^/    /' || true
     local vram_mb
@@ -478,6 +480,9 @@ provisioning_check_gpu() {
             # Also ensure the Vast supervisor sees it
             export COMFYUI_ARGS
         fi
+    else
+        printf "!! ERROR: nvidia-smi present but returned no memory info\n" >&2
+        return 1
     fi
 }
 
