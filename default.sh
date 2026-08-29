@@ -120,10 +120,18 @@ else
         printf "!! ERROR: hf_xet_download.sh sourced but hf_xet_download() not defined\n" >&2
         printf "   First 5 lines of fetched file:\n" >&2
         head -5 "${HF_XET_SCRIPT_LOCAL}" >&2
-    else
-        printf "==> hf_xet_download() loaded OK (%s bytes)\n" "$(wc -c < "${HF_XET_SCRIPT_LOCAL}")"
+        exit 1
     fi
+    printf "==> hf_xet_download() loaded OK (%s bytes)\n" "$(wc -c < "${HF_XET_SCRIPT_LOCAL}")"
 fi
+
+# Wrapper: rename the lower-level xet implementation to a higher-level
+# "download from HF" entry point. Engine choice (xet vs hf_hub) is made by
+# the dispatcher in provisioning_get_models based on config.json:models[].engine;
+# by the time we get here, the engine has already been decided.
+huggingface_download() {
+    hf_xet_download "$@"
+}
 
 # ---------------------------------------------------------------------------
 # Config loader — fetches PROVISIONING_CONFIG_URL into $CONFIG_LOCAL.
@@ -255,9 +263,8 @@ provisioning_get_models() {
     fi
     printf "==> Downloading %s model(s) from config\n" "${n_models}"
 
-    # 1) HF xet: group all files per repo, one hf_xet_download call per repo.
-    #    We use --raw-output (-r) so jq emits one line of `files[N]` per file
-    #    with no JSON quoting — then mapfile reads them as plain strings.
+    # 1) HF xet: group all files per repo, one huggingface_download call per repo.
+    #    engine="xet" routes here; engine="hf_hub" routes to section 2 below.
     declare -A hf_xet_groups=()
     while IFS=$'	' read -r repo file; do
         [[ -z "${repo}" || -z "${file}" ]] && continue
@@ -276,13 +283,19 @@ provisioning_get_models() {
     ' "${CONFIG_LOCAL}")
 
     local repo key files
+    local xet_failures=0
     for repo in "${!hf_xet_groups[@]}"; do
         mapfile -t files <<< "${hf_xet_groups[${repo}]}"
         printf "==> HF[xet] %s (%d file(s)) -> %s\n" "${repo}" "${#files[@]}" "${COMFYUI_DIR}/models"
-        hf_xet_download "${repo}" "${COMFYUI_DIR}/models" "${files[@]}" || {
-            printf "!! WARN: hf_xet_download failed for %s — continuing\n" "${repo}" >&2
-        }
+        if ! huggingface_download "${repo}" "${COMFYUI_DIR}/models" "${files[@]}"; then
+            printf "!! HF[xet] %s failed\n" "${repo}" >&2
+            xet_failures=$((xet_failures+1))
+        fi
     done
+    if [[ "${xet_failures}" -gt 0 ]]; then
+        printf "!! HF[xet]: %d repo(s) failed — aborting\n" "${xet_failures}" >&2
+        return 1
+    fi
 
     # 2) HF hf_hub: sequential `hf download` per file (resumable, slow but works
     #    on private/gated repos where xet isn't available).
@@ -305,18 +318,22 @@ provisioning_get_models() {
         | [$r, .] | @tsv
     ' "${CONFIG_LOCAL}")
 
-    if [[ "${#hf_hub_groups[@]}" -gt 0 ]] && ! command -v hf >/dev/null 2>&1; then
-        printf "!! ERROR: hf CLI not found — cannot run hf_hub engine\n" >&2
-    else
+    if [[ "${#hf_hub_groups[@]}" -gt 0 ]]; then
+        if ! command -v hf >/dev/null 2>&1; then
+            printf "!! ERROR: hf CLI not found but config has %d hf_hub model(s)\n" "${#hf_hub_groups[@]}" >&2
+            printf "   (pip install huggingface_hub[cli] or change engine to 'xet' in config)\n" >&2
+            return 1
+        fi
+        # mirror token to both env names so hf CLI picks it up regardless of which was set
+        [[ -n "${HF_TOKEN:-}" ]] && export HUGGING_FACE_HUB_TOKEN="${HF_TOKEN}"
+        [[ -n "${HUGGING_FACE_HUB_TOKEN:-}" ]] && export HF_TOKEN="${HUGGING_FACE_HUB_TOKEN}"
+        local hf_hub_failures=0
         for repo in "${!hf_hub_groups[@]}"; do
             mapfile -t files <<< "${hf_hub_groups[${repo}]}"
             printf "==> HF[hf_hub] %s (%d file(s)) — sequential, resumable\n" "${repo}" "${#files[@]}"
-            # mirror token to both env names
-            [[ -n "${HF_TOKEN:-}" ]] && export HUGGING_FACE_HUB_TOKEN="${HF_TOKEN}"
-            [[ -n "${HUGGING_FACE_HUB_TOKEN:-}" ]] && export HF_TOKEN="${HUGGING_FACE_HUB_TOKEN}"
-            local f out_path
+            local f
             for f in "${files[@]}"; do
-                out_path="${COMFYUI_DIR}/models/${f}"
+                local out_path="${COMFYUI_DIR}/models/${f}"
                 if [[ -f "${out_path}" && -s "${out_path}" ]]; then
                     printf "    SKIP: %s\n" "${f}"
                     continue
@@ -324,15 +341,18 @@ provisioning_get_models() {
                 printf "    GET %s\n" "${f}"
                 mkdir -p "$(dirname "${out_path}")"
                 if hf download "${repo}" --include "${f}" --local-dir "${COMFYUI_DIR}/models" \
-                        ${HF_TOKEN:+--token "${HF_TOKEN}"} >/dev/null 2>&1; then
+                        ${HF_TOKEN:+--token "${HF_TOKEN}"} 2>&1 | sed 's/^/      /'; then
                     printf "      OK %s\n" "${f}"
-                elif hf download "${repo}" --include "${f}" --local-dir "${COMFYUI_DIR}/models" >/dev/null 2>&1; then
-                    printf "      OK (no token) %s\n" "${f}"
                 else
                     printf "      FAIL %s\n" "${f}" >&2
+                    hf_hub_failures=$((hf_hub_failures+1))
                 fi
             done
         done
+        if [[ "${hf_hub_failures}" -gt 0 ]]; then
+            printf "!! HF[hf_hub]: %d file(s) failed — aborting\n" "${hf_hub_failures}" >&2
+            return 1
+        fi
     fi
 
     # 3) Non-HF: civitai / url. No engine choice; aria2c if present, else wget -c.
@@ -348,27 +368,31 @@ provisioning_get_models() {
         printf "==> GET [%s] %s -> %s\n" "${src}" "${url}" "${path}"
         local auth_token=""
         [[ "${src}" == "civitai" ]] && auth_token="${CIVITAI_TOKEN:-}"
-        if command -v aria2c >/dev/null 2>&1; then
-            local aria_args=(-x16 -s16 -k8M --continue=true --file-allocation=none \
-                             --auto-file-renaming=false --allow-overwrite=false \
-                             --retry-wait=3 --console-log-level=warn \
-                             --dir="${dest_dir}" --out="$(basename "${path}")")
-            [[ -n "${auth_token}" ]] && aria_args+=(--header="Authorization: Bearer ${auth_token}")
-            if ! aria2c "${aria_args[@]}" "${url}"; then
-                printf "    aria2c failed, falling back to wget -c\n" >&2
-                provisioning_download "${url}" "${dest_dir}"
-            fi
-        else
-            provisioning_download "${url}" "${dest_dir}"
+        if ! command -v aria2c >/dev/null 2>&1; then
+            printf "!! aria2c not installed — refusing to download %s (set engine to 'xet'/'hf_hub' or install aria2)\n" "${url}" >&2
+            return 1
+        fi
+        local aria_args=(-x16 -s16 -k8M --continue=true --file-allocation=none \
+                         --auto-file-renaming=false --allow-overwrite=false \
+                         --retry-wait=3 --console-log-level=warn \
+                         --dir="${dest_dir}" --out="$(basename "${path}")")
+        [[ -n "${auth_token}" ]] && aria_args+=(--header="Authorization: Bearer ${auth_token}")
+        if ! aria2c "${aria_args[@]}" "${url}"; then
+            printf "!! [%s] %s failed\n" "${src}" "${url}" >&2
+            return 1
         fi
         if [[ ! -f "${dest_file}" ]]; then
+            # aria2c --out=foo should land at exactly ${dest_file}, but if --out was
+            # ignored (e.g. server-suggested name) we need a rename, not a retry.
             local newest
             newest=$(ls -t "${dest_dir}" 2>/dev/null | head -1)
-            if [[ -n "${newest}" && -f "${dest_dir}/${newest}" ]]; then
-                if [[ "${newest}" != "$(basename "${path}")" ]]; then
-                    mv "${dest_dir}/${newest}" "${dest_file}" 2>/dev/null || \
-                        cp "${dest_dir}/${newest}" "${dest_file}" 2>/dev/null || true
-                fi
+            if [[ -n "${newest}" && -f "${dest_dir}/${newest}" && "${newest}" != "$(basename "${path}")" ]]; then
+                mv "${dest_dir}/${newest}" "${dest_file}" 2>/dev/null || \
+                    cp "${dest_dir}/${newest}" "${dest_file}" 2>/dev/null || true
+            fi
+            if [[ ! -f "${dest_file}" ]]; then
+                printf "!! [%s] file did not end up at %s\n" "${src}" "${dest_file}" >&2
+                return 1
             fi
         fi
     done < <(jq -r '
