@@ -79,23 +79,85 @@ CONFIG_LOCAL="${CONFIG_LOCAL:-/tmp/provisioning_config.json}"
 #   providers/huggingface.sh  → huggingface_download  (uses hf_xet_download)
 #   providers/civitai.sh      → civitai_download
 #   providers/url.sh          → url_download
-# Source them relative to this script so the layout works no matter where
-# default.sh lives (Vast may write it to /provisioning.sh or /workspace/).
-PROVIDERS_DIR="${VAST_H3_PROVIDERS_DIR:-$(cd "$(dirname "${VAST_H3_SCRIPT}")" && pwd)/providers}"
-if [[ ! -d "${PROVIDERS_DIR}" ]]; then
-    printf "!! ERROR: providers dir not found: %s\n" "${PROVIDERS_DIR}" >&2
-    printf "   Set VAST_H3_PROVIDERS_DIR or place providers/ next to default.sh\n" >&2
+#
+# Vast only fetches this single file (default.sh), not the whole repo, so
+# the providers/ dir does NOT exist next to the script on the instance.
+# We fetch a tarball (VAST_H3_PROVIDERS_TARBALL_URL) and extract to
+# /tmp/vast-h3-providers/. If providers are already on disk at
+# VAST_H3_PROVIDERS_DIR (e.g. a local dev tree), the fetch is skipped.
+# No fallback: if the fetch fails or the tarball has no .sh files, abort.
+VAST_H3_PROVIDERS_DIR="${VAST_H3_PROVIDERS_DIR:-/tmp/vast-h3-providers}"
+VAST_H3_PROVIDERS_TARBALL_URL="${VAST_H3_PROVIDERS_TARBALL_URL:-https://raw.githubusercontent.com/StanLukuvka/vast-h3-script/main/providers.tar.gz}"
+provisioning_load_providers() {
+    # If VAST_H3_PROVIDERS_DIR already has *.sh files, use them as-is
+    # (local dev / test harness path).
+    local existing_sh
+    shopt -s nullglob
+    existing_sh=( "${VAST_H3_PROVIDERS_DIR}"/*.sh )
+    shopt -u nullglob
+    if [[ "${#existing_sh[@]}" -gt 0 ]]; then
+        printf "==> Providers: using local %s (%d .sh files)\n" \
+            "${VAST_H3_PROVIDERS_DIR}" "${#existing_sh[@]}"
+        return 0
+    fi
+    # Else fetch the tarball. Local file:// URLs are also supported.
+    local local_tarball_path="${VAST_H3_PROVIDERS_TARBALL_URL#file://}"
+    local tarball_tmp="/tmp/vast-h3-providers.tar.gz.$$"
+    printf "==> Providers: fetching %s\n" "${VAST_H3_PROVIDERS_TARBALL_URL}"
+    if [[ "${VAST_H3_PROVIDERS_TARBALL_URL}" =~ ^https?:// ]]; then
+        if ! curl -fsSL "${VAST_H3_PROVIDERS_TARBALL_URL}" -o "${tarball_tmp}" 2>/tmp/providers_curl_err.log; then
+            printf "!! Failed to fetch providers tarball\n" >&2
+            cat /tmp/providers_curl_err.log 2>/dev/null | head -5 >&2 || true
+            return 1
+        fi
+    else
+        if [[ ! -f "${local_tarball_path}" ]]; then
+            printf "!! Local tarball not found: %s\n" "${local_tarball_path}" >&2
+            return 1
+        fi
+        if [[ "${local_tarball_path}" != "${tarball_tmp}" ]]; then
+            cp "${local_tarball_path}" "${tarball_tmp}"
+        fi
+    fi
+    if [[ ! -s "${tarball_tmp}" ]]; then
+        printf "!! Providers tarball is empty\n" >&2
+        return 1
+    fi
+    mkdir -p "${VAST_H3_PROVIDERS_DIR}"
+    # tar -xzf ... -C providers_dir  →  the tarball's top-level dir is "."
+    # (we built it that way), so files land directly in providers_dir.
+    if ! tar -xzf "${tarball_tmp}" -C "${VAST_H3_PROVIDERS_DIR}"; then
+        printf "!! Failed to extract providers tarball to %s\n" "${VAST_H3_PROVIDERS_DIR}" >&2
+        return 1
+    fi
+    rm -f "${tarball_tmp}"
+    # Verify extraction produced at least one .sh
+    shopt -s nullglob
+    local extracted_sh
+    extracted_sh=( "${VAST_H3_PROVIDERS_DIR}"/*.sh )
+    shopt -u nullglob
+    if [[ "${#extracted_sh[@]}" -eq 0 ]]; then
+        printf "!! No .sh files found in %s after extraction\n" "${VAST_H3_PROVIDERS_DIR}" >&2
+        return 1
+    fi
+    printf "==> Providers: extracted %d .sh file(s) to %s\n" \
+        "${#extracted_sh[@]}" "${VAST_H3_PROVIDERS_DIR}"
+}
+provisioning_load_providers || exit 1
+
+if [[ ! -d "${VAST_H3_PROVIDERS_DIR}" ]]; then
+    printf "!! ERROR: providers dir not found: %s\n" "${VAST_H3_PROVIDERS_DIR}" >&2
     exit 1
 fi
 provider_files_sourced=0
-for provider_file in "${PROVIDERS_DIR}"/*.sh; do
+for provider_file in "${VAST_H3_PROVIDERS_DIR}"/*.sh; do
     [[ -f "${provider_file}" ]] || continue
     # shellcheck source=/dev/null
     source "${provider_file}"
     provider_files_sourced=$((provider_files_sourced+1))
 done
 if [[ "${provider_files_sourced}" -eq 0 ]]; then
-    printf "!! ERROR: no provider files found in %s\n" "${PROVIDERS_DIR}" >&2
+    printf "!! ERROR: no provider files found in %s\n" "${VAST_H3_PROVIDERS_DIR}" >&2
     exit 1
 fi
 unset provider_file provider_files_sourced
@@ -142,9 +204,10 @@ provisioning_load_config() {
         printf "==> Config fetched OK (%s bytes)\n" "$(wc -c < "${CONFIG_LOCAL}")"
         return 0
     fi
-    # Local file
-    if [[ -f "${url}" ]]; then
-        cp "${url}" "${CONFIG_LOCAL}"
+    # Local file (accept bare path or file:// URL)
+    local local_path="${url#file://}"
+    if [[ -f "${local_path}" ]]; then
+        cp "${local_path}" "${CONFIG_LOCAL}"
         printf "==> Using local config %s (%s bytes)\n" "${url}" "$(wc -c < "${CONFIG_LOCAL}")"
         return 0
     fi
@@ -682,14 +745,11 @@ vast_h3_install_loader() {
         /^# Allow user to disable provisioning if they started/ { exit }
         { print }
     ' "${VAST_H3_SCRIPT}" > "${funcs_src}"
-    # Copy the providers/ dir next to the funcs file so the source loop in
-    # the extracted funcs can find it (PROVIDERS_DIR defaults to
-    # "$(dirname ${VAST_H3_SCRIPT})/providers" — the funcs file lives in /tmp
-    # but the real providers/ is wherever default.sh is). By copying to
-    # /tmp/vast-h3-providers/ and exporting VAST_H3_PROVIDERS_DIR, the loader
-    # and any subsequent `source` of the funcs file gets the right path.
-    mkdir -p "${providers_dir}"
-    cp -a "$(dirname "${VAST_H3_SCRIPT}")/providers/." "${providers_dir}/" 2>/dev/null || true
+    # The providers/ dir was already fetched + extracted to
+    # /tmp/vast-h3-providers/ at startup (provisioning_load_providers). On
+    # Vast, the script is at /provisioning.sh — there's no providers/ dir
+    # next to it. Export VAST_H3_PROVIDERS_DIR so the extracted funcs file
+    # (which lives at /tmp/ and re-sources everything) finds the providers.
     export VAST_H3_PROVIDERS_DIR="${providers_dir}"
     cat > "${loader}" << 'VAST_H3_EOF'
 #!/bin/bash

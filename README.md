@@ -27,13 +27,20 @@ image's supervisor launches ComfyUI.
 - `default.sh` — provisioning script (PROVISIONING_SCRIPT target). Sources the
   provider scripts; orchestrates everything else.
 - `config.json` — declarative spec: HF engine settings, modules, models, sources.
-- `providers/huggingface.sh` — `huggingface_download` (xet engine wrapper) +
-  `huggingface_load_xet_engine` (fetches `hf_xet_download.sh`).
-- `providers/civitai.sh` — `civitai_download` (aria2c with Bearer token).
-- `providers/url.sh` — `url_download` (aria2c, no auth).
+- `providers/` — per-source downloader scripts (sourced at runtime; also shipped
+  as `providers.tar.gz` for the single-file Vast fetch).
+  - `providers/huggingface.sh` — `huggingface_download` (xet engine wrapper) +
+    `huggingface_load_xet_engine` (fetches `hf_xet_download.sh`).
+  - `providers/civitai.sh` — `civitai_download` (aria2c with Bearer token).
+  - `providers/url.sh` — `url_download` (aria2c, no auth).
+- `providers.tar.gz` — bundle of `providers/*.sh`. Fetched by `default.sh` at
+  startup to `/tmp/vast-h3-providers/` (Vast only ships the single
+  `PROVISIONING_SCRIPT` file, not the whole repo). Override with
+  `VAST_H3_PROVIDERS_TARBALL_URL` (default: this repo's `main` branch).
+- `config.schema.json` — JSON Schema 2020-12 describing `config.json`. Referenced
+  by `config.json`'s `$schema` for IDE autocomplete.
 - `hf_xet_download.sh` — the standalone Xet downloader. Local copy kept for
   reference; the real one is fetched at runtime from `${HF_XET_SCRIPT_URL}`.
-- `start.sh` — legacy standalone bootstrap, kept for reference only.
 
 ## ComfyUI launch args
 
@@ -75,9 +82,14 @@ provisioning hangs trying to load the weights. The preflight GPU check forces
 
 ### Providers layout
 
-- `VAST_H3_PROVIDERS_DIR` — override where the provider scripts live (default:
-  `${VAST_H3_SCRIPT_DIR}/providers`). The `vast-h3` loader installs them to
-  `/tmp/vast-h3-providers/` automatically.
+- `VAST_H3_PROVIDERS_DIR` — where `default.sh` looks for `*.sh` provider scripts
+  (default: `/tmp/vast-h3-providers`). On Vast, the dir doesn't exist until
+  `provisioning_load_providers` fetches the tarball; on a local dev tree, set
+  this to your `providers/` path to skip the fetch.
+- `VAST_H3_PROVIDERS_TARBALL_URL` — URL of the providers tarball fetched on
+  cold start (default:
+  `https://raw.githubusercontent.com/StanLukuvka/vast-h3-script/main/providers.tar.gz`).
+  Override if you fork the repo.
 
 ## Usage (Vast.Ai)
 
@@ -114,7 +126,9 @@ vast-h3 help
 - Disk: t2v+i2v stack ≈ 50 GB used (base image 7 + weights 42.5). `--disk 70` fits.
 - Adding a new provider: drop a `*.sh` into `providers/` defining
   `<source>_download <url> <dest_dir> <dest_filename> [token]`. The dispatcher
-  picks it up automatically.
+  picks it up automatically. Re-run `tar -czf providers.tar.gz -C providers .`
+  and commit the tarball — `default.sh` won't see your new provider on Vast
+  until the tarball is rebuilt.
 
 ## Resolved: audio garble
 
