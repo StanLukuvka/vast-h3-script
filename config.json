@@ -35,6 +35,9 @@
         {
             "url": "https://github.com/StanLukuvka/ComfyUI-MiniMax-H3-SPEED",
             "branch": "${SPEED_BRANCH:-main}"
+        },
+        {
+            "url": "https://github.com/komikndr/raylight"
         }
     ],
     "env": {
