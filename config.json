@@ -7,7 +7,7 @@
                 "engine": "xet",
                 "settings": {
                     "high_performance": true,
-                    "concurrent_range_gets": 64
+                    "concurrent_range_gets": 16
                 }
             },
             {
