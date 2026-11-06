@@ -183,6 +183,10 @@ provisioning_load_config() {
         printf "!! PROVISIONING_CONFIG is not set. Set it to a URL, file path, or inline JSON before running.\n" >&2
         return 1
     fi
+    # A GitHub page link serves HTML; use the raw file behind it.
+    if [[ "${url}" =~ ^https://github\.com/([^/]+/[^/]+)/blob/(.+)$ ]]; then
+        url="https://raw.githubusercontent.com/${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
+    fi
     # Inline JSON
     if [[ "${url}" == "{"* ]]; then
         printf "%s" "${url}" > "${CONFIG_LOCAL}"
