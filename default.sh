@@ -270,7 +270,7 @@ def _expand_defaults(value: str) -> str:
     return _re.sub(r'\$\{([A-Za-z_][A-Za-z0-9_]*)(:-([^}]*))?\}', repl, value)
 
 mods = cfg.get("modules", [])
-if mods:
+if "modules" in cfg:  # an explicit empty list installs no nodes
     nodes = []
     for m in mods:
         url = _expand_defaults(m.get("url", ""))
@@ -291,6 +291,33 @@ PYEOF
     local model_count
     model_count=$(python3 -c "import json,pathlib; print(len(json.loads(pathlib.Path('/tmp/provisioning_config.json').read_text()).get('models',[])))" 2>/dev/null || echo 0)
     printf "==> Config: %s model(s), %s module(s)\n" "${model_count}" "${#NODES[@]}"
+}
+
+# Pin ComfyUI to COMFYUI_REF (a commit sha or tag, set in config.json:env or
+# the Vast env) and install that version's requirements. Unset: keep the
+# base image's ComfyUI.
+provisioning_pin_comfyui() {
+    [[ -z "${COMFYUI_REF:-}" ]] && return 0
+    printf "==> Pinning ComfyUI to %s\n" "${COMFYUI_REF}"
+    git -C "${COMFYUI_DIR}" fetch --depth 1 https://github.com/comfyanonymous/ComfyUI "${COMFYUI_REF}" \
+        && git -C "${COMFYUI_DIR}" checkout --force FETCH_HEAD \
+        && pip install --no-cache-dir -r "${COMFYUI_DIR}/requirements.txt"
+}
+
+# Symlink extra names for downloaded models, from config.json:aliases[]:
+# { path, target }, both relative to ${COMFYUI_DIR}/models/. For workflows
+# saved with a filename or subfolder that differs from the repo's.
+provisioning_apply_aliases() {
+    local path target
+    while IFS=$'\t' read -r path target; do
+        if [[ ! -f "${COMFYUI_DIR}/models/${target}" ]]; then
+            printf "!! alias %s: target %s not found\n" "${path}" "${target}" >&2
+            return 1
+        fi
+        mkdir -p "$(dirname "${COMFYUI_DIR}/models/${path}")"
+        ln -sfn "${COMFYUI_DIR}/models/${target}" "${COMFYUI_DIR}/models/${path}"
+        printf "    ALIAS: %s -> %s\n" "${path}" "${target}"
+    done < <(jq -r '.aliases[]? | [.path, .target] | @tsv' "${CONFIG_LOCAL}")
 }
 
 # Provider-agnostic model fetcher driven by config.json models[].
@@ -624,6 +651,7 @@ function provisioning_start() {
     # Apply config -> env (HF Xet settings) + NODES (modules)
     provisioning_load_config || true
     provisioning_apply_config || true
+    provisioning_pin_comfyui || exit 1
     provisioning_get_nodes
     provisioning_get_pip_packages
     printf "==> Downloading models from config\n"
@@ -635,6 +663,7 @@ function provisioning_start() {
         exit 1
     fi
     provisioning_verify_h3_weights || exit 1
+    provisioning_apply_aliases || exit 1
     provisioning_print_end
 }
 

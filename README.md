@@ -42,6 +42,22 @@ image's supervisor launches ComfyUI.
 - `hf_xet_download.sh` — the standalone Xet downloader. Local copy kept for
   reference; the real one is fetched at runtime from `${HF_XET_SCRIPT_URL}`.
 
+## Study config
+
+`study.json` sets up the SPEED resolution study: the ref2va model, text encoder and
+fp16 and audio VAEs only, with no custom nodes, and ComfyUI pinned with `COMFYUI_REF`.
+Set `PROVISIONING_CONFIG` to its raw URL. `--disk 60` fits (weights about 40 GB).
+The SPEED build and the turbo LoRA are copied from the owner's machine after boot.
+
+Two optional config features it uses:
+
+- `aliases[]`: symlinks `{path, target}` under `models/`, for workflows saved with
+  other filenames.
+- `env.COMFYUI_REF`: a commit or tag to check out before installing nodes.
+
+An explicit `"modules": []` now installs no nodes; leaving the key out still installs
+the default `NODES`.
+
 ## ComfyUI launch args
 
 Set via `COMFYUI_ARGS` (Vast) — **must include `--lowvram`** for VRAM < 32GB or

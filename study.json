@@ -1,0 +1,46 @@
+{
+    "$schema": "./config.schema.json",
+    "schema_version": 2,
+    "huggingface": {
+        "downloads": [
+            {
+                "engine": "xet",
+                "settings": {
+                    "high_performance": true,
+                    "concurrent_range_gets": 16
+                }
+            },
+            {
+                "engine": "hf_hub"
+            }
+        ]
+    },
+    "models": [
+        {
+            "source": "huggingface",
+            "repo": "Comfy-Org/MiniMax-H3",
+            "files": [
+                "diffusion_models/minimax_h3_ref2va_pruned_int8_convrot.safetensors",
+                "text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+                "vae/minimax_h3_video_vae_fp16.safetensors",
+                "vae/minimax_h3_audio_vae_fp32.safetensors"
+            ],
+            "engine": "xet"
+        }
+    ],
+    "aliases": [
+        {
+            "path": "diffusion_models/h3/minimax_h3_ref2va_pruned_int8_convrot.safetensors",
+            "target": "diffusion_models/minimax_h3_ref2va_pruned_int8_convrot.safetensors"
+        },
+        {
+            "path": "clip/qwen3vl_32b_minimax_h3_nvfp4_awq(1).safetensors",
+            "target": "text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors"
+        }
+    ],
+    "modules": [],
+    "env": {
+        "HF_HUB_ENABLE_HF_TRANSFER": "0",
+        "COMFYUI_REF": "46aad33e4d4c0696582611bf450dd93742fa9090"
+    }
+}

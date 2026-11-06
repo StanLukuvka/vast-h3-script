@@ -130,6 +130,27 @@
                 ]
             }
         },
+        "aliases": {
+            "description": "Extra names for downloaded models, created as symlinks after verification. For workflows saved with a filename or subfolder that differs from the repo's.",
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": ["path", "target"],
+                "additionalProperties": false,
+                "properties": {
+                    "path": {
+                        "description": "New name, relative to ${COMFYUI_DIR}/models/.",
+                        "type": "string",
+                        "minLength": 1
+                    },
+                    "target": {
+                        "description": "Existing file, relative to ${COMFYUI_DIR}/models/.",
+                        "type": "string",
+                        "minLength": 1
+                    }
+                }
+            }
+        },
         "modules": {
             "description": "Custom nodes / plugins to install via git clone. Each entry is cloned into ${COMFYUI_DIR}/custom_nodes/ and pip-installed if it has a requirements.txt.",
             "type": "array",
